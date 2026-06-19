@@ -3,7 +3,7 @@
 //!
 //! Boot sequence:
 //! 1. Load `.env`, build [`AppConfig`].
-//! 2. Connect to PostgreSQL.
+//! 2. Connect to `PostgreSQL`.
 //! 3. Run `migrations/*.sql` (domain schema).
 //! 4. Initialise `tower-sessions` Postgres store + run its own schema migration.
 //! 5. Seed the three test users (idempotent).
@@ -46,7 +46,7 @@ use crate::wallet::WalletManager;
 pub struct AppState {
     /// Application configuration loaded at startup.
     pub config: AppConfig,
-    /// Shared PostgreSQL connection pool.
+    /// Shared `PostgreSQL` connection pool.
     pub db: PgPool,
     /// Per-federation BDK wallet cache + Bitcoin Core RPC client.
     pub wallets: Arc<WalletManager>,

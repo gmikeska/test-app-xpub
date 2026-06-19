@@ -92,7 +92,7 @@ pub struct ProposalRow {
     pub status: String,
     /// Base64-encoded canonical PSBT.
     pub psbt_b64: String,
-    /// Structural view (outputs, total, fee, fee_rate) of the unsigned tx.
+    /// Structural view (outputs, total, fee, `fee_rate`) of the unsigned tx.
     pub proposal_json: serde_json::Value,
     /// BDK's coin-selection result for this proposal: selected UTXOs +
     /// recipient/change split.

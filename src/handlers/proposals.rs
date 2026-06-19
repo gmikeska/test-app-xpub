@@ -304,7 +304,7 @@ pub async fn detail(
 /// Response shape for the JSON sign-data endpoint. The browser hands
 /// `trezor` straight to `TrezorConnect.signTransaction`, and uses
 /// `signer_fingerprint` + `signer_slots` (echoed via the wrapped struct) to
-/// extract the per-input signatures from the Trezor result before POSTing
+/// extract the per-input signatures from the Trezor result before `POST`ing
 /// them back to `/signatures`.
 #[derive(Debug, Serialize)]
 pub struct SignDataResponse {

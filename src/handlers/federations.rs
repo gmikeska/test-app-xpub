@@ -101,7 +101,7 @@ impl BalanceView {
     /// Build a [`BalanceView`] from BDK's on-chain balance and the
     /// in-flight reservation total (sats) returned by
     /// [`crate::db::sum_inflight_inputs_for_federation`].
-    pub fn from_balance(balance: bdk_wallet::Balance, reserved_sat: u64) -> Self {
+    pub fn from_balance(balance: &bdk_wallet::Balance, reserved_sat: u64) -> Self {
         let has_pending = balance.trusted_pending > bitcoin::Amount::ZERO
             || balance.untrusted_pending > bitcoin::Amount::ZERO
             || balance.immature > bitcoin::Amount::ZERO;
@@ -199,7 +199,7 @@ pub async fn receive(
     let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
     let addresses = addresses_raw.into_iter().map(AddressView::from).collect();
     let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
+    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
 
     let federation = FederationView {
         tip_height: sync.tip_height,
@@ -230,7 +230,7 @@ pub async fn send(
     let fw = state.wallets.load_or_init(federation_id).await?;
     let sync = fw.sync().await?;
     let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
+    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
     let federation = FederationView {
         tip_height: sync.tip_height,
         ..federation

@@ -121,7 +121,7 @@ pub enum WalletError {
         source: bdk_wallet::chain::local_chain::ApplyHeaderError,
     },
 
-    /// Bitcoin Core RPC error (mempool / next_block / etc.).
+    /// Bitcoin Core RPC error (mempool / `next_block` / etc.).
     #[error("bitcoind RPC error: {0}")]
     Rpc(#[from] bitcoincore_rpc::Error),
 
@@ -151,7 +151,7 @@ pub enum WalletError {
     },
 
     /// BDK rejected a [`bitcoin::FeeRate`] constructed from the user-supplied
-    /// sat/vB value (e.g. zero, or > u64::MAX/4 ceiling).
+    /// sat/vB value (e.g. zero, or > `u64::MAX/4` ceiling).
     #[error("invalid fee rate `{sat_per_vb}` sat/vB")]
     BadFeeRate {
         /// Raw input from the form.
@@ -414,6 +414,10 @@ impl FederationWallet {
 
             let tip_height = wallet.latest_checkpoint().height();
             let delta = wallet.take_staged();
+            // Drop the BDK guard before falling out of the block so no
+            // other request holds the wallet mutex across the DB await
+            // below.
+            drop(wallet);
             (
                 SyncSummary {
                     tip_height,
@@ -428,6 +432,7 @@ impl FederationWallet {
             let mut agg = self.aggregate.lock().await;
             agg.merge(delta);
             let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
             db::update_federation_changeset(
                 &self.pool,
                 self.id,
@@ -501,6 +506,8 @@ impl FederationWallet {
 
             let delta = wallet.take_staged();
             let tip = wallet.latest_checkpoint().height();
+            // Drop the BDK guard before any DB await below.
+            drop(wallet);
             (results, delta, tip)
         };
 
@@ -508,6 +515,7 @@ impl FederationWallet {
             let mut agg = self.aggregate.lock().await;
             agg.merge(delta);
             let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
             db::update_federation_changeset(
                 &self.pool,
                 self.id,
@@ -604,6 +612,9 @@ impl FederationWallet {
                 });
             }
         }
+        // Done reading from the wallet; release the lock before sorting
+        // and constructing the return value so other requests can proceed.
+        drop(wallet);
 
         receipts.sort_by_key(|r| {
             // Confirmed first ordered by height; unconfirmed last.
@@ -672,6 +683,9 @@ impl FederationWallet {
 
             let delta = wallet.take_staged();
             let tip = wallet.latest_checkpoint().height();
+            // Drop the BDK guard before awaiting on the changeset aggregate
+            // or DB below.
+            drop(wallet);
             (psbt, delta, tip)
         };
 
@@ -683,6 +697,7 @@ impl FederationWallet {
             let mut agg = self.aggregate.lock().await;
             agg.merge(delta);
             let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
             db::update_federation_changeset(
                 &self.pool,
                 self.id,
@@ -775,6 +790,10 @@ impl FederationWallet {
                 "kind": kind,
             }));
         }
+        // Done querying the BDK wallet; release the lock before
+        // constructing the JSON view-models so concurrent requests
+        // aren't blocked on cheap serde work.
+        drop(wallet);
 
         let fee_sat = total_input_sat.saturating_sub(total_output_sat);
 
@@ -810,7 +829,7 @@ impl FederationWallet {
     ///   - `address_n`: BIP-32 path for the **signing Trezor**'s key on this
     ///     input (pulled from the PSBT's `bip32_derivation` map by master
     ///     fingerprint).
-    ///   - `multisig.pubkeys[i]`: each cosigner's HDNode + the relative
+    ///   - `multisig.pubkeys[i]`: each cosigner's `HDNode` + the relative
     ///     derivation suffix (`[keychain, index]`), sorted lexicographically
     ///     by raw pubkey bytes at this derivation — i.e. matched to
     ///     `sortedmulti`'s on-chain script order.
@@ -1213,6 +1232,7 @@ impl FederationWallet {
         let fully_signed = wallet
             .finalize_psbt(&mut probe, SignOptions::default())
             .unwrap_or(false);
+        drop(wallet);
 
         Ok(MergedPsbt {
             merged_psbt_b64: base.to_string(),
@@ -1233,6 +1253,7 @@ impl FederationWallet {
         let done = wallet
             .finalize_psbt(&mut psbt, SignOptions::default())
             .map_err(|e| WalletError::Finalize(Box::new(e)))?;
+        drop(wallet);
         if !done {
             return Err(WalletError::NotEnoughSignatures);
         }
@@ -1329,7 +1350,7 @@ pub struct AddressActivity {
 pub struct BuiltProposal {
     /// Base64-encoded unsigned PSBT (canonical form).
     pub psbt_b64: String,
-    /// Structural view: outputs, total, fee, fee_rate. Stored in the
+    /// Structural view: outputs, total, fee, `fee_rate`. Stored in the
     /// `proposal_json` column.
     pub proposal_json: serde_json::Value,
     /// Coin-selection breakdown. Stored in `coin_selection_json`.
@@ -1374,7 +1395,7 @@ pub struct TrezorSignRequest {
     pub inputs: Vec<TrezorInput>,
     /// One entry per PSBT output.
     pub outputs: Vec<TrezorOutput>,
-    /// Previous transactions in Trezor's RefTx format. Required by Connect
+    /// Previous transactions in Trezor's `RefTx` format. Required by Connect
     /// for some firmware versions even with native segwit.
     #[serde(rename = "refTxs")]
     pub ref_txs: Vec<TrezorRefTx>,
@@ -1436,7 +1457,7 @@ pub enum TrezorOutput {
         amount: String,
         /// `"PAYTOWITNESS"` for native P2WSH multisig change. The
         /// firmware reads the presence of `multisig` and produces a
-        /// P2WSH script_pubkey (rather than P2WPKH) internally.
+        /// P2WSH `script_pubkey` (rather than P2WPKH) internally.
         script_type: String,
         /// Same shape as input multisig at the change index.
         multisig: TrezorMultisig,
@@ -1457,13 +1478,13 @@ pub struct TrezorMultisig {
 /// One entry in `multisig.pubkeys`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TrezorMultisigPubkey {
-    /// HDNode form of the cosigner's xpub.
+    /// `HDNode` form of the cosigner's xpub.
     pub node: TrezorHdNode,
     /// Relative derivation from the xpub for this input/output.
     pub address_n: Vec<u32>,
 }
 
-/// HDNode form Trezor expects (matches the protobuf HDNodeType).
+/// `HDNode` form Trezor expects (matches the protobuf `HDNodeType`).
 #[derive(Debug, Clone, Serialize)]
 pub struct TrezorHdNode {
     /// BIP-32 depth.
@@ -1489,7 +1510,7 @@ pub struct TrezorRefTx {
     pub lock_time: u32,
     /// Stripped input list (no witness).
     pub inputs: Vec<TrezorRefInput>,
-    /// Output list with amount + script_pubkey.
+    /// Output list with amount + `script_pubkey`.
     pub bin_outputs: Vec<TrezorRefOutput>,
 }
 

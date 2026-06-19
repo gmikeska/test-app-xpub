@@ -17,7 +17,7 @@ pub struct AppConfig {
     pub bind: SocketAddr,
     /// Session cookie signing key (hex, decoded into bytes at startup).
     pub session_secret: Vec<u8>,
-    /// PostgreSQL connection string.
+    /// `PostgreSQL` connection string.
     pub database_url: String,
     /// Bitcoin network every onboarded signer must agree with.
     pub network: Network,
