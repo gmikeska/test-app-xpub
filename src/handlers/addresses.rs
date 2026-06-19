@@ -114,8 +114,7 @@ pub async fn show(
         )));
     }
     let (keychain, index) = derivation.map_or((None, None), |(k, i)| (Some(k), Some(i)));
-    let keychain_str =
-        keychain.map_or_else(|| "—".to_string(), keychain_label);
+    let keychain_str = keychain.map_or_else(|| "—".to_string(), keychain_label);
 
     let activity = fw.address_history(&address).await?;
 
@@ -129,7 +128,12 @@ pub async fn show(
         .light_color(svg::Color("#f4f6fb"))
         .build();
 
-    let receipts = activity.receipts.iter().cloned().map(ReceiptView::from).collect();
+    let receipts = activity
+        .receipts
+        .iter()
+        .cloned()
+        .map(ReceiptView::from)
+        .collect();
 
     Ok(AddressDetailTemplate {
         email: user.email,

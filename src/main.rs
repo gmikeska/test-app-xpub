@@ -124,10 +124,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(handlers::home::root))
         .route("/home", get(handlers::home::home))
-        .route("/login", get(handlers::auth::login_get).post(handlers::auth::login_post))
+        .route(
+            "/login",
+            get(handlers::auth::login_get).post(handlers::auth::login_post),
+        )
         .route("/logout", post(handlers::auth::logout_post))
         .route("/onboard", get(handlers::onboard::onboard_get))
-        .route("/onboard/signer", post(handlers::onboard::onboard_signer_post))
+        .route(
+            "/onboard/signer",
+            post(handlers::onboard::onboard_signer_post),
+        )
         .route(
             "/federations/{id}",
             get(handlers::federations::redirect_to_default),

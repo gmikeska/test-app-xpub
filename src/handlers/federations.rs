@@ -198,8 +198,7 @@ pub async fn receive(
 
     let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
     let addresses = addresses_raw.into_iter().map(AddressView::from).collect();
-    let reserved_sat =
-        db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
     let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
 
     let federation = FederationView {
@@ -230,8 +229,7 @@ pub async fn send(
     // coin-selection are fresh.
     let fw = state.wallets.load_or_init(federation_id).await?;
     let sync = fw.sync().await?;
-    let reserved_sat =
-        db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
     let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
     let federation = FederationView {
         tip_height: sync.tip_height,
@@ -338,7 +336,8 @@ impl From<ProposalRow> for ProposalView {
         let recipient = r
             .proposal_json
             .get("recipient")
-            .and_then(|v| v.as_str()).map_or_else(|| "—".to_string(), std::string::ToString::to_string);
+            .and_then(|v| v.as_str())
+            .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
         let amount_sats = r
             .proposal_json
             .get("recipient_amount_sat")

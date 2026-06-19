@@ -50,7 +50,11 @@ pub async fn login_get(
         tracing::debug!(user = %user.email, "already logged in, redirecting from /login");
         return Ok(Redirect::to("/").into_response());
     }
-    Ok(LoginTemplate { email: String::new(), error: None }.into_response())
+    Ok(LoginTemplate {
+        email: String::new(),
+        error: None,
+    }
+    .into_response())
 }
 
 /// `POST /login`

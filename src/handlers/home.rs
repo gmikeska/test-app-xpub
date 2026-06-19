@@ -77,7 +77,14 @@ fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
         return s.to_string();
     }
     let head_part: String = s.chars().take(head).collect();
-    let tail_part: String = s.chars().rev().take(tail).collect::<String>().chars().rev().collect();
+    let tail_part: String = s
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     format!("{head_part}…{tail_part}")
 }
 

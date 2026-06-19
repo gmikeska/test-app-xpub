@@ -37,9 +37,7 @@ use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::consensus::Encodable;
 use bitcoin::ecdsa::Signature as EcdsaSignature;
 use bitcoin::sighash::EcdsaSighashType;
-use bitcoin::{
-    Address, Amount, FeeRate, Network, Psbt, PublicKey, ScriptBuf, Transaction, Txid,
-};
+use bitcoin::{Address, Amount, FeeRate, Network, Psbt, PublicKey, ScriptBuf, Transaction, Txid};
 use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -254,8 +252,8 @@ impl WalletManager {
             config.bitcoin_rpc_user.clone(),
             config.bitcoin_rpc_password.clone(),
         );
-        let rpc = RpcClient::new(&config.bitcoin_rpc_url, auth)
-            .map_err(WalletError::RpcClientInit)?;
+        let rpc =
+            RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
@@ -286,11 +284,10 @@ impl WalletManager {
         let row = db::find_federation_by_id(&self.pool, federation_id)
             .await?
             .ok_or(WalletError::NotFound(federation_id))?;
-        let network =
-            Network::from_str(&row.network).map_err(|_| WalletError::BadNetwork {
-                id: federation_id,
-                network: row.network.clone(),
-            })?;
+        let network = Network::from_str(&row.network).map_err(|_| WalletError::BadNetwork {
+            id: federation_id,
+            network: row.network.clone(),
+        })?;
 
         let (wallet, initial_changeset) = if let Some(json) = row.bdk_changeset {
             tracing::debug!(federation_id = %federation_id, "loading wallet from persisted changeset");
@@ -395,8 +392,7 @@ impl FederationWallet {
             let mut wallet = self.inner.lock().await;
             let cp = wallet.latest_checkpoint();
             let start_height = cp.height();
-            let mut emitter =
-                Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
+            let mut emitter = Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
 
             let mut new_blocks = 0u32;
             while let Some(block_event) = emitter.next_block()? {
@@ -529,11 +525,12 @@ impl FederationWallet {
     /// network. Used to make URL params safe to feed into BDK queries.
     pub fn parse_address(&self, raw: &str) -> Result<Address, WalletError> {
         let unchecked: Address<NetworkUnchecked> =
-            raw.parse().map_err(|e: bitcoin::address::ParseError| WalletError::BadAddress {
-                addr: raw.to_string(),
-                network: self.network,
-                reason: e.to_string(),
-            })?;
+            raw.parse()
+                .map_err(|e: bitcoin::address::ParseError| WalletError::BadAddress {
+                    addr: raw.to_string(),
+                    network: self.network,
+                    reason: e.to_string(),
+                })?;
         unchecked
             .require_network(self.network)
             .map_err(|e| WalletError::BadAddress {
@@ -555,10 +552,7 @@ impl FederationWallet {
     ///
     /// Returns oldest-first by chain position (confirmed first by
     /// ascending height, then unconfirmed last-seen ascending).
-    pub async fn address_history(
-        &self,
-        address: &Address,
-    ) -> Result<AddressActivity, WalletError> {
+    pub async fn address_history(&self, address: &Address) -> Result<AddressActivity, WalletError> {
         let target_spk: ScriptBuf = address.script_pubkey();
 
         let wallet = self.inner.lock().await;
@@ -659,8 +653,10 @@ impl FederationWallet {
         amount: Amount,
         fee_rate_sat_vb: u64,
     ) -> Result<BuiltProposal, WalletError> {
-        let fee_rate = FeeRate::from_sat_per_vb(fee_rate_sat_vb)
-            .ok_or(WalletError::BadFeeRate { sat_per_vb: fee_rate_sat_vb })?;
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
 
         let (psbt, delta, tip) = {
             let mut wallet = self.inner.lock().await;
@@ -724,7 +720,11 @@ impl FederationWallet {
         for txin in &psbt.unsigned_tx.input {
             let op = txin.previous_output;
             if let Some(utxo) = wallet.get_utxo(op) {
-                let addr = Address::from_script(&utxo.txout.script_pubkey, self.network).map_or_else(|_| utxo.txout.script_pubkey.to_hex_string(), |a| a.to_string());
+                let addr = Address::from_script(&utxo.txout.script_pubkey, self.network)
+                    .map_or_else(
+                        |_| utxo.txout.script_pubkey.to_hex_string(),
+                        |a| a.to_string(),
+                    );
                 let amount_sat = utxo.txout.value.to_sat();
                 total_input_sat = total_input_sat.saturating_add(amount_sat);
                 selected_inputs.push(serde_json::json!({
@@ -758,7 +758,8 @@ impl FederationWallet {
             total_output_sat = total_output_sat.saturating_add(amount_sat);
             let is_mine = wallet.is_mine(txout.script_pubkey.clone());
             let is_recipient = txout.script_pubkey == recipient_spk;
-            let addr = Address::from_script(&txout.script_pubkey, self.network).map_or_else(|_| txout.script_pubkey.to_hex_string(), |a| a.to_string());
+            let addr = Address::from_script(&txout.script_pubkey, self.network)
+                .map_or_else(|_| txout.script_pubkey.to_hex_string(), |a| a.to_string());
             let kind = if is_recipient {
                 recipient_sat = recipient_sat.saturating_add(amount_sat);
                 "recipient"
@@ -851,13 +852,14 @@ impl FederationWallet {
 
         let mut decoded: Vec<DecodedCosigner> = Vec::with_capacity(cosigners.len());
         for row in cosigners {
-            let xpub = Xpub::from_str(&row.xpub).map_err(|source| {
-                WalletError::BadCosignerXpub { id: row.id, source }
-            })?;
-            let fp = Fingerprint::from_str(&row.fingerprint).map_err(|source| {
-                WalletError::BadCosignerFingerprint { id: row.id, source }
-            })?;
-            decoded.push(DecodedCosigner { xpub, fingerprint: fp });
+            let xpub = Xpub::from_str(&row.xpub)
+                .map_err(|source| WalletError::BadCosignerXpub { id: row.id, source })?;
+            let fp = Fingerprint::from_str(&row.fingerprint)
+                .map_err(|source| WalletError::BadCosignerFingerprint { id: row.id, source })?;
+            decoded.push(DecodedCosigner {
+                xpub,
+                fingerprint: fp,
+            });
         }
 
         let secp = bitcoin::secp256k1::Secp256k1::verification_only();
@@ -865,14 +867,10 @@ impl FederationWallet {
 
         let mut inputs = Vec::with_capacity(psbt.unsigned_tx.input.len());
         let mut ref_txids: Vec<bitcoin::Txid> = Vec::new();
-        let mut my_input_paths: Vec<DerivationPath> = Vec::with_capacity(psbt.unsigned_tx.input.len());
+        let mut my_input_paths: Vec<DerivationPath> =
+            Vec::with_capacity(psbt.unsigned_tx.input.len());
 
-        for (txin, psbt_input) in psbt
-            .unsigned_tx
-            .input
-            .iter()
-            .zip(psbt.inputs.iter())
-        {
+        for (txin, psbt_input) in psbt.unsigned_tx.input.iter().zip(psbt.inputs.iter()) {
             let op = txin.previous_output;
             ref_txids.push(op.txid);
             let amount = psbt_input
@@ -909,9 +907,10 @@ impl FederationWallet {
             let mut entries: Vec<MultisigPubkeyEntry> = decoded
                 .iter()
                 .map(|c| {
-                    let derived = c.xpub.derive_pub(&secp, &relative).expect(
-                        "BIP-32 unhardened derivation cannot fail",
-                    );
+                    let derived = c
+                        .xpub
+                        .derive_pub(&secp, &relative)
+                        .expect("BIP-32 unhardened derivation cannot fail");
                     let pubkey_bytes = derived.to_pub().0.serialize();
                     MultisigPubkeyEntry {
                         sort_key: pubkey_bytes,
@@ -960,25 +959,25 @@ impl FederationWallet {
                 .bip32_derivation
                 .iter()
                 .find_map(|(_pk, (fp, path))| {
-                    if *fp == signing_fp { Some(path.clone()) } else { None }
+                    if *fp == signing_fp {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
                 });
 
             if let Some(path) = signer_path {
                 let path_vec: Vec<ChildNumber> = path.into();
-                let relative: Vec<ChildNumber> = path_vec
-                    .iter()
-                    .rev()
-                    .take(2)
-                    .rev()
-                    .copied()
-                    .collect();
+                let relative: Vec<ChildNumber> =
+                    path_vec.iter().rev().take(2).rev().copied().collect();
 
                 let mut entries: Vec<MultisigPubkeyEntry> = decoded
                     .iter()
                     .map(|c| {
-                        let derived = c.xpub.derive_pub(&secp, &relative).expect(
-                            "BIP-32 unhardened derivation cannot fail",
-                        );
+                        let derived = c
+                            .xpub
+                            .derive_pub(&secp, &relative)
+                            .expect("BIP-32 unhardened derivation cannot fail");
                         let pubkey_bytes = derived.to_pub().0.serialize();
                         MultisigPubkeyEntry {
                             sort_key: pubkey_bytes,
@@ -997,24 +996,25 @@ impl FederationWallet {
                     .collect();
                 let signatures: Vec<String> = (0..pubkeys.len()).map(|_| String::new()).collect();
 
-                    outputs.push(TrezorOutput::Change {
-                        address_n: derivation_path_to_indices(&path_vec),
-                        amount: amount.to_string(),
-                        // Native P2WSH: `PAYTOWITNESS` + a `multisig` field is
-                        // how Trezor whitelists this output as our change.
-                        // `PAYTOMULTISIG` is the *legacy P2SH* multisig code
-                        // path and triggers the "wrong derivation path for
-                        // selected account" warning on the firmware screen.
-                        script_type: "PAYTOWITNESS".into(),
-                        multisig: TrezorMultisig {
-                            pubkeys,
-                            signatures,
-                            m: threshold_u32,
-                        },
-                    });
+                outputs.push(TrezorOutput::Change {
+                    address_n: derivation_path_to_indices(&path_vec),
+                    amount: amount.to_string(),
+                    // Native P2WSH: `PAYTOWITNESS` + a `multisig` field is
+                    // how Trezor whitelists this output as our change.
+                    // `PAYTOMULTISIG` is the *legacy P2SH* multisig code
+                    // path and triggers the "wrong derivation path for
+                    // selected account" warning on the firmware screen.
+                    script_type: "PAYTOWITNESS".into(),
+                    multisig: TrezorMultisig {
+                        pubkeys,
+                        signatures,
+                        m: threshold_u32,
+                    },
+                });
             } else {
                 // Recipient output — render as a paying address.
-                let address = Address::from_script(&txout.script_pubkey, self.network).map_or_else(|_| txout.script_pubkey.to_hex_string(), |a| a.to_string());
+                let address = Address::from_script(&txout.script_pubkey, self.network)
+                    .map_or_else(|_| txout.script_pubkey.to_hex_string(), |a| a.to_string());
                 outputs.push(TrezorOutput::External {
                     address,
                     amount: amount.to_string(),
@@ -1027,8 +1027,7 @@ impl FederationWallet {
         // bitcoincore_rpc client. Wrap in spawn_blocking so the executor
         // stays responsive on slow regtest nodes / mempool RPC stalls.
         let mut unique_txids: Vec<bitcoin::Txid> = Vec::new();
-        let mut seen: std::collections::HashSet<bitcoin::Txid> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
         for txid in ref_txids {
             if seen.insert(txid) {
                 unique_txids.push(txid);
@@ -1228,12 +1227,8 @@ impl FederationWallet {
     /// - [`WalletError::Finalize`] if BDK's signer machinery errors.
     /// - [`WalletError::NotEnoughSignatures`] if finalize hits no error but
     ///   still can't satisfy every input (threshold not yet met).
-    pub async fn finalize_and_extract(
-        &self,
-        psbt_b64: &str,
-    ) -> Result<FinalizedTx, WalletError> {
-        let mut psbt =
-            Psbt::from_str(psbt_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
+    pub async fn finalize_and_extract(&self, psbt_b64: &str) -> Result<FinalizedTx, WalletError> {
+        let mut psbt = Psbt::from_str(psbt_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
         let wallet = self.inner.lock().await;
         let done = wallet
             .finalize_psbt(&mut psbt, SignOptions::default())

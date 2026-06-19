@@ -62,7 +62,10 @@ pub fn verify_password(plain: &str, hash_phc: &str) -> Result<bool, password_has
 /// # Errors
 /// Returns a [`tower_sessions::session::Error`] if the session store
 /// rejects the write.
-pub async fn log_in(session: &Session, user_id: Uuid) -> Result<(), tower_sessions::session::Error> {
+pub async fn log_in(
+    session: &Session,
+    user_id: Uuid,
+) -> Result<(), tower_sessions::session::Error> {
     session.insert(USER_ID_KEY, user_id).await
 }
 

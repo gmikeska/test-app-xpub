@@ -7,9 +7,7 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{
-    FederationRow, ProposalRow, RejectionRow, SignatureRow, SignerRow, UserRow,
-};
+use crate::models::{FederationRow, ProposalRow, RejectionRow, SignatureRow, SignerRow, UserRow};
 
 /// Run all `migrations/*.sql` against `pool`.
 ///
@@ -49,10 +47,7 @@ pub async fn upsert_user_if_absent(
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn find_user_by_email(
-    pool: &PgPool,
-    email: &str,
-) -> sqlx::Result<Option<UserRow>> {
+pub async fn find_user_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Option<UserRow>> {
     sqlx::query_as::<_, UserRow>(
         "SELECT id, email, password_hash, created_at \
          FROM users WHERE lower(email) = lower($1)",
@@ -120,10 +115,7 @@ pub async fn insert_signer(
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn list_signers_for_user(
-    pool: &PgPool,
-    user_id: Uuid,
-) -> sqlx::Result<Vec<SignerRow>> {
+pub async fn list_signers_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<SignerRow>> {
     sqlx::query_as::<_, SignerRow>(
         "SELECT id, user_id, label, descriptor_key, xpub, fingerprint, \
                 derivation_path, device_type, network, created_at \
@@ -139,11 +131,10 @@ pub async fn list_signers_for_user(
 /// # Errors
 /// Propagates any underlying SQL error.
 pub async fn user_has_signer(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM signers WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM signers WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
     Ok(count > 0)
 }
 
@@ -152,10 +143,7 @@ pub async fn user_has_signer(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool>
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn find_signer_for_user(
-    pool: &PgPool,
-    user_id: Uuid,
-) -> sqlx::Result<Option<SignerRow>> {
+pub async fn find_signer_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<SignerRow>> {
     sqlx::query_as::<_, SignerRow>(
         "SELECT id, user_id, label, descriptor_key, xpub, fingerprint, \
                 derivation_path, device_type, network, created_at \
@@ -196,10 +184,7 @@ pub async fn list_federations_for_user(
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn find_federation_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> sqlx::Result<Option<FederationRow>> {
+pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT id, label, threshold, total_signers, network, descriptor, \
                 snapshot_json, bdk_changeset, chain_tip_height, created_at \
@@ -372,13 +357,11 @@ pub async fn update_federation_tip_only(
     federation_id: Uuid,
     tip_height: i32,
 ) -> sqlx::Result<()> {
-    sqlx::query(
-        "UPDATE federations SET chain_tip_height = $1 WHERE id = $2",
-    )
-    .bind(tip_height)
-    .bind(federation_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE federations SET chain_tip_height = $1 WHERE id = $2")
+        .bind(tip_height)
+        .bind(federation_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -427,10 +410,7 @@ pub async fn insert_proposal(
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn find_proposal_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> sqlx::Result<Option<ProposalRow>> {
+pub async fn find_proposal_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<ProposalRow>> {
     sqlx::query_as::<_, ProposalRow>(&format!(
         "SELECT {PROPOSAL_COLUMNS} FROM transaction_proposals WHERE id = $1",
     ))

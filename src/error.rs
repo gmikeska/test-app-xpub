@@ -72,7 +72,11 @@ impl IntoResponse for AppError {
                 tracing::debug!(error = %self, "404");
                 (StatusCode::NOT_FOUND, "Federation not found").into_response()
             }
-            Self::Wallet(WalletError::BadAddress { addr, network, reason }) => {
+            Self::Wallet(WalletError::BadAddress {
+                addr,
+                network,
+                reason,
+            }) => {
                 tracing::debug!(%addr, %network, %reason, "400 bad address");
                 (
                     StatusCode::BAD_REQUEST,

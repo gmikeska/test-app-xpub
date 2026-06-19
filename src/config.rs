@@ -56,10 +56,12 @@ impl AppConfig {
                 var: "APP_PORT",
                 reason: e.to_string(),
             })?;
-        let host_ip: IpAddr = host.parse().map_err(|e: std::net::AddrParseError| ConfigError::Parse {
-            var: "APP_HOST",
-            reason: e.to_string(),
-        })?;
+        let host_ip: IpAddr =
+            host.parse()
+                .map_err(|e: std::net::AddrParseError| ConfigError::Parse {
+                    var: "APP_HOST",
+                    reason: e.to_string(),
+                })?;
 
         let secret_hex = require("APP_SESSION_SECRET")?;
         let session_secret = hex_decode(&secret_hex).map_err(|reason| ConfigError::Parse {
@@ -102,8 +104,8 @@ impl AppConfig {
         let bitcoin_rpc_url = format!("http://{rpc_host}:{rpc_port}");
         let bitcoin_rpc_user = require("BITCOIN_RPC_USER")?;
         let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
-        let bitcoin_wallet_name = optional("BITCOIN_WALLET_NAME")
-            .unwrap_or_else(|| "asterism-xpub".to_string());
+        let bitcoin_wallet_name =
+            optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "asterism-xpub".to_string());
 
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),

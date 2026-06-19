@@ -202,7 +202,8 @@ pub async fn detail(
     let (federation, _cosigners) = load_header(&state, federation_id, user.id).await?;
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     let proposer = db::find_user_by_id(&state.db, proposal.proposed_by)
-        .await?.map_or_else(|| "—".to_string(), |u| u.email);
+        .await?
+        .map_or_else(|| "—".to_string(), |u| u.email);
 
     let signatures = db::list_signatures_for_proposal(&state.db, proposal_id).await?;
     let rejections = db::list_rejections_for_proposal(&state.db, proposal_id).await?;
@@ -237,7 +238,9 @@ pub async fn detail(
                     .as_ref()
                     .and_then(|sr| sr.label.clone())
                     .unwrap_or_else(|| "Trezor".to_string()),
-                fingerprint: s.as_ref().map_or_else(|| "—".to_string(), |sr| sr.fingerprint.clone()),
+                fingerprint: s
+                    .as_ref()
+                    .map_or_else(|| "—".to_string(), |sr| sr.fingerprint.clone()),
                 state: state_label,
                 when,
                 reason,
@@ -254,20 +257,22 @@ pub async fn detail(
 
     let detail_view = ProposalDetailView {
         id: proposal.id,
-        label: proposal.label.clone().unwrap_or_else(|| "(no label)".to_string()),
+        label: proposal
+            .label
+            .clone()
+            .unwrap_or_else(|| "(no label)".to_string()),
         status: proposal.status.clone(),
         status_class: status_class(&proposal.status).to_string(),
         proposer_email: proposer,
         created_at: format_timestamp(proposal.created_at),
         updated_at: format_timestamp(proposal.updated_at),
         recipient: proposal_recipient(&proposal),
-        recipient_amount_btc: format_btc_sats(
-            proposal_field_u64(&proposal, "recipient_amount_sat"),
-        ),
+        recipient_amount_btc: format_btc_sats(proposal_field_u64(
+            &proposal,
+            "recipient_amount_sat",
+        )),
         fee_btc: format_btc_sats(proposal_field_u64(&proposal, "fee_sat")),
-        total_output_btc: format_btc_sats(
-            proposal_field_u64(&proposal, "total_output_sat"),
-        ),
+        total_output_btc: format_btc_sats(proposal_field_u64(&proposal, "total_output_sat")),
         change_btc: format_btc_sats(proposal_field_u64(&proposal, "change_sat")),
         input_count: proposal_field_u64(&proposal, "input_count"),
         psbt_b64: proposal.psbt_b64.clone(),
@@ -327,10 +332,7 @@ pub async fn sign_data(
         .ok_or_else(|| AppError::BadRequest("you have no Trezor onboarded".to_string()))?;
 
     let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
-    let cosigners: Vec<SignerRow> = members
-        .into_iter()
-        .filter_map(|(_, s)| s)
-        .collect();
+    let cosigners: Vec<SignerRow> = members.into_iter().filter_map(|(_, s)| s).collect();
     let total_signers = usize::try_from(row.total_signers).unwrap_or(0);
     if cosigners.len() != total_signers {
         return Err(AppError::BadRequest(format!(
@@ -343,7 +345,12 @@ pub async fn sign_data(
 
     let fw = state.wallets.load_or_init(federation_id).await?;
     let trezor = fw
-        .trezor_sign_request(&proposal.psbt_b64, &signer.fingerprint, &cosigners, threshold)
+        .trezor_sign_request(
+            &proposal.psbt_b64,
+            &signer.fingerprint,
+            &cosigners,
+            threshold,
+        )
         .await?;
 
     Ok(Json(SignDataResponse {
@@ -409,7 +416,11 @@ pub async fn submit_signature(
         .merge_partial_signature(&proposal.psbt_b64, &partial_b64)
         .await?;
 
-    let new_status = if merged.fully_signed { "finalized" } else { "signing" };
+    let new_status = if merged.fully_signed {
+        "finalized"
+    } else {
+        "signing"
+    };
 
     let inserted =
         db::insert_signature(&state.db, proposal_id, signer.id, user.id, &partial_b64).await?;
@@ -604,7 +615,8 @@ fn require_status_in(p: &ProposalRow, allowed: &[&str]) -> Result<(), AppError> 
 fn proposal_recipient(p: &ProposalRow) -> String {
     p.proposal_json
         .get("recipient")
-        .and_then(|v| v.as_str()).map_or_else(|| "—".to_string(), std::string::ToString::to_string)
+        .and_then(|v| v.as_str())
+        .map_or_else(|| "—".to_string(), std::string::ToString::to_string)
 }
 
 fn proposal_field_u64(p: &ProposalRow, field: &str) -> u64 {
@@ -628,8 +640,14 @@ fn status_class(status: &str) -> &'static str {
 fn build_coin_selection_view(p: &ProposalRow) -> CoinSelectionView {
     let cs = &p.coin_selection_json;
 
-    let total_input_sat = cs.get("total_input_sat").and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let fee_sat = cs.get("fee_sat").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let total_input_sat = cs
+        .get("total_input_sat")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let fee_sat = cs
+        .get("fee_sat")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
 
     let selected: Vec<CoinSelectionInput> = cs
         .get("selected")
@@ -649,14 +667,18 @@ fn build_coin_selection_view(p: &ProposalRow) -> CoinSelectionView {
                 .and_then(|v| v.as_str())
                 .unwrap_or("—")
                 .to_string();
-            let amount_sat = entry.get("amount_sat").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let amount_sat = entry
+                .get("amount_sat")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             let keychain = entry
                 .get("keychain")
                 .and_then(|v| v.as_str())
                 .unwrap_or("—")
                 .to_string();
             let derivation_index = entry
-                .get("derivation_index").map_or_else(|| "—".to_string(), std::string::ToString::to_string);
+                .get("derivation_index")
+                .map_or_else(|| "—".to_string(), std::string::ToString::to_string);
             CoinSelectionInput {
                 outpoint,
                 outpoint_short,
@@ -681,7 +703,10 @@ fn build_coin_selection_view(p: &ProposalRow) -> CoinSelectionView {
                 .unwrap_or("—")
                 .to_string(),
             amount_btc: format_btc_sats(
-                entry.get("amount_sat").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                entry
+                    .get("amount_sat")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
             ),
             kind: entry
                 .get("kind")
