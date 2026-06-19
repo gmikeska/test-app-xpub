@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Onboard your Trezor — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block head %}
+  <script>
+    window.ASTERISM = {
+      trezorCoin: {{ trezor_coin|json|safe }},
+      manifestEmail: {{ trezor_manifest_email|json|safe }},
+      manifestAppUrl: {{ trezor_manifest_app_url|json|safe }},
+      derivationPath: {{ derivation_path|json|safe }},
+      network: {{ network|json|safe }},
+    };
+  </script>
+  <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
+  <script src="/static/onboard.js" defer></script>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Onboard your Trezor</h1>
+  <p>Welcome, <strong>{{ email }}</strong>. To finish setting up your account we need to capture the extended public key (XPUB) from your Trezor at the federation derivation path. The device stays in your hands — this app never sees your seed or your private keys.</p>
+
+  <dl class="kv">
+    <dt>Network</dt><dd><code>{{ network }}</code></dd>
+    <dt>Derivation path</dt><dd><code>{{ derivation_path }}</code></dd>
+    <dt>Trezor coin</dt><dd><code>{{ trezor_coin }}</code></dd>
+  </dl>
+
+  <form id="onboard-form" class="form">
+    <label>
+      <span>Label (optional)</span>
+      <input type="text" name="label" id="label" placeholder="e.g. My Trezor Model T" maxlength="64">
+    </label>
+    <button type="button" id="capture-btn" class="btn btn-primary">Connect Trezor &amp; capture XPUB</button>
+  </form>
+
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+  <div id="result" class="result" hidden>
+    <h2>Captured</h2>
+    <dl class="kv">
+      <dt>Fingerprint</dt><dd><code id="r-fp"></code></dd>
+      <dt>Derivation path</dt><dd><code id="r-path"></code></dd>
+      <dt>XPUB</dt><dd><code id="r-xpub" class="break"></code></dd>
+      <dt>Descriptor key</dt><dd><code id="r-dk" class="break"></code></dd>
+    </dl>
+    <button type="button" id="save-btn" class="btn btn-primary">Save and continue</button>
+  </div>
+
+  <details class="hint">
+    <summary>Troubleshooting</summary>
+    <ul>
+      <li>Make sure the Trezor Bridge / WebUSB permission is granted.</li>
+      <li>Trezor Connect requires your Trezor to be unlocked.</li>
+      <li>If you're using the Trezor Emulator, set the emulator port in <code>connect.trezor.io/9/popup</code> dev mode.</li>
+    </ul>
+  </details>
+</section>
+{% endblock %}

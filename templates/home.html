@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Home — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Welcome, {{ email }}</h1>
+  <p class="muted">Your onboarded hardware wallets are listed below, along with every federation you currently belong to.</p>
+</section>
+
+<section class="card">
+  <h2>Your hardware wallets</h2>
+  {% if signers.is_empty() %}
+    <p class="muted">No hardware wallets onboarded yet.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Device</th>
+          <th>Network</th>
+          <th>Fingerprint</th>
+          <th>Path</th>
+          <th>XPUB</th>
+          <th>Added</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in signers %}
+          <tr>
+            <td>{{ s.label }}</td>
+            <td>{{ s.device_type }}</td>
+            <td><code>{{ s.network }}</code></td>
+            <td><code>{{ s.fingerprint }}</code></td>
+            <td><code>{{ s.derivation_path }}</code></td>
+            <td><code>{{ s.xpub_truncated }}</code></td>
+            <td>{{ s.created_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Your federations</h2>
+  {% if federations.is_empty() %}
+    <p class="muted">You are not a member of any federation yet. Once a federation is constructed and you're added as a member, it will appear here.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Policy</th>
+          <th>Network</th>
+          <th>Descriptor</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in federations %}
+          <tr>
+            <td>{{ f.label }}</td>
+            <td>{{ f.threshold }}-of-{{ f.total_signers }}</td>
+            <td><code>{{ f.network }}</code></td>
+            <td><code class="break">{{ f.descriptor }}</code></td>
+            <td>{{ f.created_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}
