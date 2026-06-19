@@ -440,12 +440,27 @@ details[open] > summary { color: var(--text); }
   font-weight: 500;
   letter-spacing: 0.04em;
 }
+.balance-rollups {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  text-align: right;
+}
 .balance-spendable {
   color: var(--muted);
   font-size: 0.95rem;
 }
 .balance-spendable strong {
   color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.balance-reserved {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.balance-reserved strong {
+  color: #f1cf86;
   font-variant-numeric: tabular-nums;
 }
 .balance-breakdown {

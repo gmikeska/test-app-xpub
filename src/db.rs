@@ -439,6 +439,40 @@ pub async fn find_proposal_by_id(
     .await
 }
 
+/// Sum of selected-UTXO amounts (sats) across every proposal whose status
+/// is in `('proposed', 'signing', 'finalized')` — i.e. *in flight*, neither
+/// cancelled nor broadcast. This is what the Balance card subtracts from
+/// BDK's "spendable" to expose the federation's *post-reservation*
+/// spendable balance.
+///
+/// Once a proposal flips to `broadcast`, BDK's own balance picks up the
+/// on-chain spend (input UTXOs disappear, change reappears), so we stop
+/// double-counting by excluding it here. `cancelled` proposals likewise
+/// fall out, returning their reserved sats to spendable on the next
+/// page load.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn sum_inflight_inputs_for_federation(
+    pool: &PgPool,
+    federation_id: Uuid,
+) -> sqlx::Result<u64> {
+    // PostgreSQL widens `SUM(bigint)` to `numeric` to avoid overflow over
+    // very large groups. sqlx-postgres won't auto-decode `numeric` into
+    // `i64`, so we cast the COALESCE'd aggregate back to `bigint`. Our
+    // amounts (capped at ~21M BTC = 2.1e15 sats) comfortably fit in i64.
+    let sats: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM((coin_selection_json->>'total_input_sat')::bigint), 0)::bigint \
+         FROM transaction_proposals \
+         WHERE federation_id = $1 \
+           AND status IN ('proposed', 'signing', 'finalized')",
+    )
+    .bind(federation_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(u64::try_from(sats).unwrap_or(0))
+}
+
 /// All proposals for a federation, newest first.
 ///
 /// # Errors

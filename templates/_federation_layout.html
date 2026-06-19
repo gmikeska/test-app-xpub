@@ -67,8 +67,15 @@
       <span class="balance-amount">{{ balance.total_btc }}</span>
       <span class="balance-unit">BTC</span>
     </div>
-    <div class="balance-spendable">
-      Spendable now: <strong>{{ balance.spendable_btc }} BTC</strong>
+    <div class="balance-rollups">
+      <div class="balance-spendable">
+        Spendable now: <strong>{{ balance.spendable_btc }} BTC</strong>
+      </div>
+      {% if balance.has_reserved %}
+        <div class="balance-reserved">
+          Reserved (in flight): <strong>{{ balance.reserved_btc }} BTC</strong>
+        </div>
+      {% endif %}
     </div>
   </div>
   {% if balance.has_pending %}

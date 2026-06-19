@@ -72,35 +72,57 @@ pub struct AddressView {
 /// View-model for the federation-balance card. Mirrors the breakdown BDK
 /// exposes on [`bdk_wallet::Balance`] (`confirmed` / `trusted_pending` /
 /// `untrusted_pending` / `immature`) plus the conventional `total` and
-/// `spendable` rollups.
+/// `spendable` rollups, and a `reserved` row covering sats locked up in
+/// in-flight proposals (status `proposed` / `signing` / `finalized`).
 #[derive(Debug, Clone, Serialize)]
 pub struct BalanceView {
     pub confirmed_btc: String,
     pub trusted_pending_btc: String,
     pub untrusted_pending_btc: String,
     pub immature_btc: String,
-    /// `confirmed + trusted_pending` — what's safely spendable right now.
+    /// `confirmed + trusted_pending - reserved` — money the user can
+    /// commit to a *new* proposal right now without double-spending an
+    /// in-flight one.
     pub spendable_btc: String,
-    /// `confirmed + trusted_pending + untrusted_pending + immature`.
+    /// `confirmed + trusted_pending + untrusted_pending + immature`. The
+    /// on-chain reality, ignoring the proposal queue.
     pub total_btc: String,
+    /// Sum of selected-UTXO amounts across in-flight proposals.
+    pub reserved_btc: String,
     /// `true` iff any of the pending/immature buckets are non-zero. Lets
     /// the template omit the breakdown when everything is fully confirmed.
     pub has_pending: bool,
+    /// `true` iff `reserved_sat > 0`. Lets the template hide the row
+    /// when no proposals are in flight.
+    pub has_reserved: bool,
 }
 
-impl From<bdk_wallet::Balance> for BalanceView {
-    fn from(b: bdk_wallet::Balance) -> Self {
-        let has_pending = b.trusted_pending > bitcoin::Amount::ZERO
-            || b.untrusted_pending > bitcoin::Amount::ZERO
-            || b.immature > bitcoin::Amount::ZERO;
+impl BalanceView {
+    /// Build a [`BalanceView`] from BDK's on-chain balance and the
+    /// in-flight reservation total (sats) returned by
+    /// [`crate::db::sum_inflight_inputs_for_federation`].
+    pub fn from_balance(balance: bdk_wallet::Balance, reserved_sat: u64) -> Self {
+        let has_pending = balance.trusted_pending > bitcoin::Amount::ZERO
+            || balance.untrusted_pending > bitcoin::Amount::ZERO
+            || balance.immature > bitcoin::Amount::ZERO;
+        let reserved = bitcoin::Amount::from_sat(reserved_sat);
+        // BDK's trusted_spendable is the "spend right now" baseline.
+        // Subtract reserved; `Amount::checked_sub` keeps us safe if a
+        // race ever puts reserved > spendable.
+        let spendable = balance
+            .trusted_spendable()
+            .checked_sub(reserved)
+            .unwrap_or(bitcoin::Amount::ZERO);
         Self {
-            confirmed_btc: format_btc(b.confirmed),
-            trusted_pending_btc: format_btc(b.trusted_pending),
-            untrusted_pending_btc: format_btc(b.untrusted_pending),
-            immature_btc: format_btc(b.immature),
-            spendable_btc: format_btc(b.trusted_spendable()),
-            total_btc: format_btc(b.total()),
+            confirmed_btc: format_btc(balance.confirmed),
+            trusted_pending_btc: format_btc(balance.trusted_pending),
+            untrusted_pending_btc: format_btc(balance.untrusted_pending),
+            immature_btc: format_btc(balance.immature),
+            spendable_btc: format_btc(spendable),
+            total_btc: format_btc(balance.total()),
+            reserved_btc: format_btc(reserved),
             has_pending,
+            has_reserved: reserved_sat > 0,
         }
     }
 }
@@ -176,7 +198,9 @@ pub async fn receive(
 
     let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
     let addresses = addresses_raw.into_iter().map(AddressView::from).collect();
-    let balance: BalanceView = fw.balance().await.into();
+    let reserved_sat =
+        db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
 
     let federation = FederationView {
         tip_height: sync.tip_height,
@@ -206,7 +230,9 @@ pub async fn send(
     // coin-selection are fresh.
     let fw = state.wallets.load_or_init(federation_id).await?;
     let sync = fw.sync().await?;
-    let balance: BalanceView = fw.balance().await.into();
+    let reserved_sat =
+        db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let balance = BalanceView::from_balance(fw.balance().await, reserved_sat);
     let federation = FederationView {
         tip_height: sync.tip_height,
         ..federation
