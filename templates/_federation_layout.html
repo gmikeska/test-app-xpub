@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}{{ federation.label }} — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="crumbs"><a href="/home">← Back to your federations</a></div>
+  <h1>
+    {{ federation.label }}
+    <span class="badge {{ federation.network }}">{{ federation.network }}</span>
+  </h1>
+  <dl class="kv-grid">
+    <dt>Policy</dt>
+    <dd>{{ federation.threshold }}-of-{{ federation.total_signers }}</dd>
+
+    <dt>Created</dt>
+    <dd>{{ federation.created_at }}</dd>
+
+    <dt>Chain tip</dt>
+    <dd>{{ federation.tip_height }}</dd>
+
+    <dt>Descriptor</dt>
+    <dd><code class="break">{{ federation.descriptor }}</code></dd>
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Cosigners</h2>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Device</th>
+        <th>Fingerprint</th>
+        <th>Path</th>
+        <th>XPUB</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cosigners %}
+        <tr>
+          <td>
+            {{ c.email }}
+            {% if c.is_self %}<span class="you">you</span>{% endif %}
+          </td>
+          <td>{{ c.device_type }}</td>
+          <td><code>{{ c.fingerprint }}</code></td>
+          <td><code>{{ c.derivation_path }}</code></td>
+          <td><code>{{ c.xpub_truncated }}</code></td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card balance-card">
+  <h2>Balance</h2>
+  <div class="balance-headline">
+    <div class="balance-total">
+      <span class="balance-amount">{{ balance.total_btc }}</span>
+      <span class="balance-unit">BTC</span>
+    </div>
+    <div class="balance-spendable">
+      Spendable now: <strong>{{ balance.spendable_btc }} BTC</strong>
+    </div>
+  </div>
+  {% if balance.has_pending %}
+    <dl class="kv-grid balance-breakdown">
+      <dt>Confirmed</dt>
+      <dd>{{ balance.confirmed_btc }} BTC</dd>
+
+      <dt>Trusted pending</dt>
+      <dd>{{ balance.trusted_pending_btc }} BTC</dd>
+
+      <dt>Untrusted pending</dt>
+      <dd>{{ balance.untrusted_pending_btc }} BTC</dd>
+
+      <dt>Immature</dt>
+      <dd>{{ balance.immature_btc }} BTC</dd>
+    </dl>
+  {% endif %}
+</section>
+
+<nav class="tabs">
+  <a class="tab {% if active_tab == "receive" %}active{% endif %}"
+     href="/federations/{{ federation.id }}/receive">Receive</a>
+  <a class="tab {% if active_tab == "send" %}active{% endif %}"
+     href="/federations/{{ federation.id }}/send">Send</a>
+</nav>
+
+{% block tab_body %}{% endblock %}
+{% endblock %}

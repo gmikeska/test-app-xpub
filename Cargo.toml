@@ -13,6 +13,16 @@ asterism-xpub = { path = "../asterism-xpub" }
 bitcoin = "0.32"
 miniscript = "12"
 
+# BDK — per-federation wallet (address derivation, UTXO/tx tracking, descriptor
+# persistence via ChangeSet). Bitcoin Core RPC sync via the bdk_bitcoind_rpc
+# Emitter against the local regtest node.
+bdk_wallet = { version = "3.1", features = ["std"] }
+bdk_bitcoind_rpc = "0.22"
+bitcoincore-rpc = "0.19"
+
+# Server-side QR rendering for the address detail page.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
 # Web stack
 axum = "0.8.9"
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal"] }

@@ -15,6 +15,7 @@ mod db;
 mod error;
 mod handlers;
 mod models;
+mod wallet;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use crate::config::AppConfig;
+use crate::wallet::WalletManager;
 
 /// Application state injected into every handler.
 #[derive(Clone)]
@@ -46,8 +48,14 @@ pub struct AppState {
     pub config: AppConfig,
     /// Shared PostgreSQL connection pool.
     pub db: PgPool,
+    /// Per-federation BDK wallet cache + Bitcoin Core RPC client.
+    pub wallets: Arc<WalletManager>,
 }
 
+// Boot sequence is linear and well-commented; splitting just to satisfy the
+// 100-line cap would obscure the relative ordering of `migrate → seed →
+// session-store init → router build`.
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load `.env` next to the crate root if present (so the app can be
@@ -96,7 +104,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_expiry(Expiry::OnInactivity(TimeDuration::days(7)))
         .with_name("asterism_session");
 
-    let state = Arc::new(AppState { config: config.clone(), db: pool });
+    let wallets = Arc::new(WalletManager::new(pool.clone(), &config)?);
+    tracing::info!(
+        rpc = %config.bitcoin_rpc_url,
+        wallet = %config.bitcoin_wallet_name,
+        "Bitcoin Core RPC client ready",
+    );
+
+    let state = Arc::new(AppState {
+        config: config.clone(),
+        db: pool,
+        wallets,
+    });
 
     // Resolve `static/` relative to the crate root so the binary works
     // regardless of the caller's CWD.
@@ -109,6 +128,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/logout", post(handlers::auth::logout_post))
         .route("/onboard", get(handlers::onboard::onboard_get))
         .route("/onboard/signer", post(handlers::onboard::onboard_signer_post))
+        .route(
+            "/federations/{id}",
+            get(handlers::federations::redirect_to_default),
+        )
+        .route(
+            "/federations/{id}/receive",
+            get(handlers::federations::receive),
+        )
+        .route("/federations/{id}/send", get(handlers::federations::send))
+        .route(
+            "/federations/{id}/addresses/{address}",
+            get(handlers::addresses::show),
+        )
+        .route(
+            "/federations/{id}/proposals",
+            post(handlers::proposals::create),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}",
+            get(handlers::proposals::detail),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/sign-data",
+            get(handlers::proposals::sign_data),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/signatures",
+            post(handlers::proposals::submit_signature),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/rejections",
+            post(handlers::proposals::submit_rejection),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/cancel",
+            post(handlers::proposals::cancel),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/broadcast",
+            post(handlers::proposals::broadcast),
+        )
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(TraceLayer::new_for_http())
         .layer(session_layer)

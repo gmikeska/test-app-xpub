@@ -191,3 +191,269 @@ h2 { margin: 0 0 12px; font-size: 1.15rem; color: var(--text); }
   padding: 0 24px;
   color: var(--muted);
 }
+
+/* Federation detail / address detail specific bits. */
+
+.crumbs {
+  font-size: 0.9rem;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.crumbs a { color: var(--muted); }
+.crumbs a:hover { color: var(--accent); }
+
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-left: 8px;
+  vertical-align: 2px;
+}
+.badge.regtest { background: #2a1f33; border-color: #5b3d6f; color: #d6b2ee; }
+.badge.testnet { background: #1d2d3f; border-color: #2c5588; color: #b6d4ff; }
+.badge.bitcoin { background: #2d2516; border-color: #6f5723; color: #f1cf86; }
+
+.kv-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+  font-size: 0.95rem;
+}
+.kv-grid dt { color: var(--muted); }
+.kv-grid dd { margin: 0; }
+.kv-grid dd code.break {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.you {
+  font-size: 0.7rem;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-strong);
+  color: white;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .split { grid-template-columns: 1fr; }
+}
+
+.qr {
+  background: #f4f6fb;
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.qr svg { display: block; max-width: 100%; height: auto; }
+
+.tag-spent {
+  background: var(--panel-2);
+  color: var(--muted);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+.tag-unspent {
+  background: #14331f;
+  color: #c3f0d4;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+}
+
+/* Tab strip for Receive / Send. */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: -8px 0 0 0;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  padding: 10px 18px;
+  font-size: 0.95rem;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  transform: translateY(1px);
+  user-select: none;
+}
+.tab:hover { color: var(--text); text-decoration: none; }
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Proposal status badges. */
+.status-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  vertical-align: 1px;
+  margin-left: 6px;
+}
+.status-badge.status-proposed,
+.status-badge.status-pending {
+  background: #1d2230;
+  border-color: #2a3142;
+  color: #cfd6e6;
+}
+.status-badge.status-signing,
+.status-badge.status-signed {
+  background: #1d2d3f;
+  border-color: #2c5588;
+  color: #b6d4ff;
+}
+.status-badge.status-finalized {
+  background: #2d2516;
+  border-color: #6f5723;
+  color: #f1cf86;
+}
+.status-badge.status-broadcast {
+  background: #14331f;
+  border-color: #2b6b41;
+  color: #c3f0d4;
+}
+.status-badge.status-cancelled,
+.status-badge.status-rejected {
+  background: #3a1818;
+  border-color: #6b2a2a;
+  color: #ffd0d0;
+}
+
+/* Proposal page action row + form. */
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.action-row .primary {
+  background: var(--accent-strong);
+  border: 1px solid var(--accent-strong);
+  color: white;
+  padding: 9px 16px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.action-row .primary:hover { background: var(--accent); border-color: var(--accent); }
+.action-row .primary:disabled { opacity: 0.55; cursor: not-allowed; }
+.action-row .danger { color: var(--danger); }
+.action-row input[type="text"] {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  min-width: 220px;
+}
+
+/* Send-tab form. */
+.stack-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+  max-width: 520px;
+}
+.stack-form label { display: flex; flex-direction: column; gap: 6px; }
+.stack-form label span { font-size: 0.85rem; color: var(--muted); }
+.stack-form input {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+.stack-form input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+/* Raw-PSBT / coin-selection blocks. */
+.psbt {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow-y: auto;
+}
+details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  list-style: revert;
+}
+details[open] > summary { color: var(--text); }
+
+.crumbs .sep { margin: 0 6px; color: var(--border); }
+
+/* Federation balance card. */
+.balance-card .balance-headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 6px;
+}
+.balance-total .balance-amount {
+  font-size: 2rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.balance-total .balance-unit {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+.balance-spendable {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+.balance-spendable strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.balance-breakdown {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+.balance-breakdown dd {
+  font-variant-numeric: tabular-nums;
+}

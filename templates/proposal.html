@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+
+{% block title %}Proposal {{ proposal.id }} — {{ federation.label }} — Asterism{% endblock %}
+
+{% block head %}
+  <script>
+    window.ASTERISM = {
+      federationId: "{{ federation.id }}",
+      proposalId: "{{ proposal.id }}",
+      manifestEmail: "dev@asterism.test",
+      manifestAppUrl: window.location.origin,
+    };
+  </script>
+  <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
+  <script src="/static/proposal-sign.js" defer></script>
+{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <div class="crumbs">
+    <a href="/home">← Your federations</a>
+    <span class="sep">/</span>
+    <a href="/federations/{{ federation.id }}/send">{{ federation.label }}</a>
+  </div>
+  <h1>
+    {{ proposal.label }}
+    <span class="status-badge {{ proposal.status_class }}">{{ proposal.status }}</span>
+  </h1>
+  <dl class="kv-grid">
+    <dt>Recipient</dt>
+    <dd><code class="break">{{ proposal.recipient }}</code></dd>
+
+    <dt>Amount</dt>
+    <dd>{{ proposal.recipient_amount_btc }} BTC</dd>
+
+    <dt>Change</dt>
+    <dd>{{ proposal.change_btc }} BTC</dd>
+
+    <dt>Fee</dt>
+    <dd>{{ proposal.fee_btc }} BTC</dd>
+
+    <dt>Inputs</dt>
+    <dd>{{ proposal.input_count }}</dd>
+
+    <dt>Proposer</dt>
+    <dd>{{ proposal.proposer_email }}</dd>
+
+    <dt>Created</dt>
+    <dd>{{ proposal.created_at }}</dd>
+
+    <dt>Last updated</dt>
+    <dd>{{ proposal.updated_at }}</dd>
+
+    {% if let Some(txid) = proposal.txid %}
+      <dt>Txid</dt>
+      <dd><code class="break">{{ txid }}</code></dd>
+    {% endif %}
+
+    {% if let Some(ts) = proposal.broadcast_at %}
+      <dt>Broadcast</dt>
+      <dd>{{ ts }}</dd>
+    {% endif %}
+  </dl>
+</section>
+
+<section class="card">
+  <h2>Cosigner status</h2>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Cosigner</th>
+        <th>Device</th>
+        <th>Fingerprint</th>
+        <th>Status</th>
+        <th>When</th>
+        <th>Reason / Note</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cosigner_statuses %}
+        <tr>
+          <td>
+            {{ c.email }}
+            {% if c.is_self %}<span class="you">you</span>{% endif %}
+          </td>
+          <td>{{ c.label }}</td>
+          <td><code>{{ c.fingerprint }}</code></td>
+          <td><span class="status-badge status-{{ c.state }}">{{ c.state }}</span></td>
+          <td>{% if let Some(w) = c.when %}{{ w }}{% else %}—{% endif %}</td>
+          <td>
+            {% if let Some(r) = c.reason %}
+              <span class="muted">{{ r }}</span>
+            {% else %}
+              —
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Actions</h2>
+  <div class="action-row">
+    {% if proposal.status == "proposed" || proposal.status == "signing" %}
+      {% if viewer_has_signer && !viewer_already_signed %}
+        <button id="sign-btn"
+                class="primary"
+                data-federation-id="{{ federation.id }}"
+                data-proposal-id="{{ proposal.id }}">
+          Sign with Trezor
+        </button>
+      {% endif %}
+
+      {% if !viewer_already_rejected %}
+        <form method="post" action="/federations/{{ federation.id }}/proposals/{{ proposal.id }}/rejections" class="inline-form">
+          <input type="text" name="reason" placeholder="Reason (optional)" maxlength="240">
+          <button type="submit" class="link danger">Reject (advisory)</button>
+        </form>
+      {% endif %}
+    {% endif %}
+
+    {% if proposal.status == "finalized" %}
+      <form method="post" action="/federations/{{ federation.id }}/proposals/{{ proposal.id }}/broadcast" class="inline-form">
+        <button type="submit" class="primary">Broadcast</button>
+      </form>
+    {% endif %}
+
+    {% if is_proposer && proposal.status != "broadcast" && proposal.status != "cancelled" %}
+      <form method="post" action="/federations/{{ federation.id }}/proposals/{{ proposal.id }}/cancel" class="inline-form">
+        <button type="submit" class="link danger">Cancel proposal</button>
+      </form>
+    {% endif %}
+  </div>
+  <div id="sign-status" class="muted" aria-live="polite"></div>
+</section>
+
+<section class="card">
+  <details>
+    <summary><strong>Coin selection</strong></summary>
+
+    <h3>Selected UTXOs</h3>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Outpoint</th>
+          <th>Address</th>
+          <th>Amount (BTC)</th>
+          <th>Keychain</th>
+          <th>Index</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in coin_selection.selected %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td title="{{ u.outpoint }}"><code>{{ u.outpoint_short }}</code></td>
+            <td><code class="break">{{ u.address }}</code></td>
+            <td>{{ u.amount_btc }}</td>
+            <td>{{ u.keychain }}</td>
+            <td>{{ u.derivation_index }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3"><strong>Total in</strong></td>
+          <td><strong>{{ coin_selection.total_input_btc }}</strong></td>
+          <td colspan="2"></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <h3>Outputs</h3>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Amount (BTC)</th>
+          <th>Kind</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in coin_selection.outputs %}
+          <tr>
+            <td><code class="break">{{ o.address }}</code></td>
+            <td>{{ o.amount_btc }}</td>
+            <td>{{ o.kind }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>Fee</strong></td>
+          <td><strong>{{ coin_selection.fee_btc }}</strong></td>
+          <td></td>
+        </tr>
+      </tfoot>
+    </table>
+  </details>
+</section>
+
+<section class="card">
+  <details>
+    <summary><strong>Raw PSBT</strong></summary>
+    <pre class="psbt"><code>{{ proposal.psbt_b64 }}</code></pre>
+    {% if let Some(hex) = proposal.finalized_tx_hex %}
+      <h3>Finalized raw tx (hex)</h3>
+      <pre class="psbt"><code>{{ hex }}</code></pre>
+    {% endif %}
+  </details>
+</section>
+{% endblock %}

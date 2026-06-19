@@ -13,6 +13,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Serialize;
 use tower_sessions::Session;
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::{self, AuthUser};
@@ -35,11 +36,11 @@ struct HomeTemplate {
 /// View-model for one row in the federations list.
 #[derive(Debug, Serialize)]
 struct FederationView {
+    /// Federation id — used to build the `/federations/:id` link.
+    id: Uuid,
     label: String,
     threshold: i32,
     total_signers: i32,
-    network: String,
-    descriptor: String,
     created_at: String,
 }
 
@@ -122,11 +123,10 @@ pub async fn home(
         .await?
         .into_iter()
         .map(|f| FederationView {
+            id: f.id,
             label: f.label,
             threshold: f.threshold,
             total_signers: f.total_signers,
-            network: f.network,
-            descriptor: f.descriptor,
             created_at: f.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
         })
         .collect();

@@ -57,20 +57,16 @@
     <table class="data">
       <thead>
         <tr>
-          <th>Label</th>
+          <th>Federation</th>
           <th>Policy</th>
-          <th>Network</th>
-          <th>Descriptor</th>
           <th>Created</th>
         </tr>
       </thead>
       <tbody>
         {% for f in federations %}
           <tr>
-            <td>{{ f.label }}</td>
+            <td><a href="/federations/{{ f.id }}">{{ f.label }}</a></td>
             <td>{{ f.threshold }}-of-{{ f.total_signers }}</td>
-            <td><code>{{ f.network }}</code></td>
-            <td><code class="break">{{ f.descriptor }}</code></td>
             <td>{{ f.created_at }}</td>
           </tr>
         {% endfor %}

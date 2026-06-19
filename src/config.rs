@@ -29,6 +29,17 @@ pub struct AppConfig {
     pub trezor_manifest_email: String,
     /// Trezor Connect manifest origin URL.
     pub trezor_manifest_app_url: String,
+    /// Bitcoin Core JSON-RPC base URL, e.g. `http://127.0.0.1:18443`.
+    pub bitcoin_rpc_url: String,
+    /// Bitcoin Core RPC username.
+    pub bitcoin_rpc_user: String,
+    /// Bitcoin Core RPC password.
+    pub bitcoin_rpc_password: String,
+    /// Name passed to Bitcoin Core's `loadwallet` when needed.
+    ///
+    /// Currently unused by the BDK descriptor wallet path, but kept for
+    /// future RPC calls that require a wallet context.
+    pub bitcoin_wallet_name: String,
 }
 
 impl AppConfig {
@@ -80,6 +91,20 @@ impl AppConfig {
         let trezor_manifest_app_url = optional("TREZOR_MANIFEST_APP_URL")
             .unwrap_or_else(|| format!("http://{host_ip}:{port}"));
 
+        let rpc_host = require("BITCOIN_RPC_HOST")?;
+        let rpc_port: u16 =
+            require("BITCOIN_RPC_PORT")?
+                .parse()
+                .map_err(|e: std::num::ParseIntError| ConfigError::Parse {
+                    var: "BITCOIN_RPC_PORT",
+                    reason: e.to_string(),
+                })?;
+        let bitcoin_rpc_url = format!("http://{rpc_host}:{rpc_port}");
+        let bitcoin_rpc_user = require("BITCOIN_RPC_USER")?;
+        let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
+        let bitcoin_wallet_name = optional("BITCOIN_WALLET_NAME")
+            .unwrap_or_else(|| "asterism-xpub".to_string());
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -89,6 +114,10 @@ impl AppConfig {
             trezor_coin,
             trezor_manifest_email,
             trezor_manifest_app_url,
+            bitcoin_rpc_url,
+            bitcoin_rpc_user,
+            bitcoin_rpc_password,
+            bitcoin_wallet_name,
         })
     }
 }

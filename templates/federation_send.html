@@ -1,0 +1,66 @@
+{% extends "_federation_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>New proposal</h2>
+  <p class="muted">Build an unsigned PSBT with BDK's coin selection. After it's created, cosigners can sign with their Trezor.</p>
+  <form method="post" action="/federations/{{ federation.id }}/proposals" class="stack-form">
+    <label>
+      <span>Recipient address</span>
+      <input type="text" name="recipient_address" required autocomplete="off" spellcheck="false"
+             placeholder="bcrt1q…">
+    </label>
+    <label>
+      <span>Amount (BTC)</span>
+      <input type="text" name="amount_btc" required autocomplete="off"
+             placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
+    </label>
+    <label>
+      <span>Fee rate (sat/vB)</span>
+      <input type="number" name="fee_rate_sat_vb" required min="1" value="2" step="1">
+    </label>
+    <label>
+      <span>Label (optional)</span>
+      <input type="text" name="label" autocomplete="off" maxlength="120"
+             placeholder="e.g. payroll Q3">
+    </label>
+    <div class="action-row">
+      <button type="submit" class="primary">Create proposal</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Proposals</h2>
+  {% if proposals.is_empty() %}
+    <p class="muted">No proposals yet.</p>
+  {% else %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Recipient</th>
+          <th>Amount</th>
+          <th>Fee</th>
+          <th>Status</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in proposals %}
+          <tr>
+            <td>
+              <a href="/federations/{{ federation.id }}/proposals/{{ p.id }}">{{ p.label }}</a>
+            </td>
+            <td><code class="break">{{ p.recipient }}</code></td>
+            <td>{{ p.amount_btc }}</td>
+            <td>{{ p.fee_btc }}</td>
+            <td><span class="status-badge status-{{ p.status }}">{{ p.status }}</span></td>
+            <td>{{ p.created_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}
