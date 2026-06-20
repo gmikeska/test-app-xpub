@@ -1,8 +1,8 @@
 # test-app-xpub
 
 Server-rendered Axum web app that exercises
-[`asterism-xpub`](../asterism-xpub) and
-[`asterism-core`](../asterism-core) end-to-end against a local Bitcoin
+[`asterism-xpub`](https://github.com/gmikeska/asterism-xpub/) and
+[`asterism-core`](https://github.com/gmikeska/asterism-core/) end-to-end against a local Bitcoin
 Core regtest node:
 
 1. **User auth.** Email + password login (Argon2id, signed
