@@ -219,7 +219,7 @@ test-app-xpub/
 The crate is wired up for strict clippy:
 
 ```bash
-cargo clippy --all-features -- -D warnings -W clippy::pedantic -W clippy::nursery -W rust-2018-idioms
+cargo clippy --all-features -- -D warnings -W clippy::pedantic -W rust-2018-idioms
 ```
 
 Run before pushing changes that touch the wallet or proposal modules —

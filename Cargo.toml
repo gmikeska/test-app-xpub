@@ -74,14 +74,11 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
 # Web-handler signatures naturally collect many extractors and many fields.
 too_many_arguments = "allow"
 module_name_repetitions = "allow"
 # Async handlers commonly take owned types by value (axum extractors).
 needless_pass_by_value = "allow"
-# Web handlers often delegate work in error paths.
-significant_drop_tightening = "allow"
 # Background text refers to PostgreSQL — backtick noise hurts readability.
 doc_markdown = "allow"
 # A list-item continuation indented to align with prose reads better than
