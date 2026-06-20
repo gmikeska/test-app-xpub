@@ -135,6 +135,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::onboard::onboard_signer_post),
         )
         .route(
+            "/federations/new",
+            get(handlers::new_federation::new_federation_get),
+        )
+        .route(
+            "/federations",
+            post(handlers::new_federation::new_federation_post),
+        )
+        .route(
             "/federations/{id}",
             get(handlers::federations::redirect_to_default),
         )

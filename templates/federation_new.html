@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}New federation — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Create a federation</h1>
+  <p class="muted">Pick the cosigners and threshold for a new <code>wsh(sortedmulti)</code> federation on <code>{{ network }}</code>. Every cosigner contributes the P2WSH xpub at <code>{{ derivation_path }}</code> they onboarded with their Trezor.</p>
+</section>
+
+<section class="card">
+  <form method="post" action="/federations" class="stack-form">
+
+    <label>
+      <span>Label</span>
+      <input type="text" name="label" required maxlength="100" autocomplete="off"
+             placeholder="e.g. Treasury 2-of-3">
+    </label>
+
+    <label>
+      <span>Threshold (m, signatures required)</span>
+      <input type="number" name="threshold" required min="1" step="1" value="2">
+    </label>
+
+    <fieldset class="member-picker">
+      <legend>Members</legend>
+      <p class="muted">You're always a member of the federations you create. Check the other cosigners you'd like to include — they need a Trezor onboarded at <code>{{ derivation_path }}</code> first, otherwise the federation won't build.</p>
+
+      {# Hidden duplicate keeps the creator in the submission even when #}
+      {# the disabled checkbox below is stripped by the browser.        #}
+      <input type="hidden" name="member_ids" value="{{ creator_id }}">
+
+      <ul class="member-list">
+        {% for c in candidates %}
+          <li class="member-row{% if c.is_creator %} member-row-self{% endif %}">
+            <label class="member-label">
+              {% if c.is_creator %}
+                <input type="checkbox" checked disabled>
+              {% else %}
+                <input type="checkbox" name="member_ids" value="{{ c.id }}">
+              {% endif %}
+              <span class="member-email">{{ c.email }}</span>
+              {% if c.is_creator %}
+                <span class="you">YOU</span>
+              {% endif %}
+              {% if c.has_p2wsh_signer %}
+                <span class="badge badge-ok">Hardware wallet on file</span>
+              {% else %}
+                <span class="badge badge-warn">No hardware wallet onboarded</span>
+              {% endif %}
+            </label>
+          </li>
+        {% endfor %}
+      </ul>
+    </fieldset>
+
+    <div class="action-row">
+      <button type="submit" class="primary">Create federation</button>
+      <a href="/home" class="link">Cancel</a>
+    </div>
+  </form>
+</section>
+
+<style>
+  .member-picker { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .member-picker legend { padding: 0 6px; color: var(--muted); font-size: 0.85rem; }
+  .member-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .member-row { padding: 8px 10px; border-radius: 6px; }
+  .member-row:hover { background: var(--panel-2); }
+  .member-row-self { background: var(--panel-2); }
+  .member-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .member-row-self .member-label { cursor: default; }
+  .member-email { font-weight: 500; }
+  .badge.badge-ok { background: #14331f; border-color: #2b6b41; color: #c3f0d4; }
+  .badge.badge-warn { background: #3a1818; border-color: #6b2a2a; color: #ffd0d0; }
+</style>
+{% endblock %}

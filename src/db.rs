@@ -154,9 +154,155 @@ pub async fn find_signer_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<
     .await
 }
 
+/// Fetch the user's signer at a specific BIP-32 derivation path. Used by
+/// federation-creation flows that need the *P2WSH* signer specifically (a
+/// `m/48'/.../2'` xpub), not just "any" onboarded signer.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn find_signer_for_user_at_path(
+    pool: &PgPool,
+    user_id: Uuid,
+    derivation_path: &str,
+) -> sqlx::Result<Option<SignerRow>> {
+    sqlx::query_as::<_, SignerRow>(
+        "SELECT id, user_id, label, descriptor_key, xpub, fingerprint, \
+                derivation_path, device_type, network, created_at \
+         FROM signers WHERE user_id = $1 AND derivation_path = $2 \
+         ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(derivation_path)
+    .fetch_optional(pool)
+    .await
+}
+
+/// One row in the federation-creation form's user picker: the candidate
+/// user plus a flag for whether they have a P2WSH signer on file at the
+/// configured derivation path. The flag drives UI badges only; submission
+/// validation runs separately on the server.
+#[derive(Debug, Clone)]
+pub struct UserPickerRow {
+    /// The candidate user.
+    pub user: UserRow,
+    /// `true` iff the user has at least one `signers` row at the configured
+    /// P2WSH derivation path.
+    pub has_p2wsh_signer: bool,
+}
+
+/// Every registered user, paired with a `has_p2wsh_signer` flag computed
+/// against `derivation_path`. Ordered by email for stable rendering.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn list_users_with_p2wsh_signer_status(
+    pool: &PgPool,
+    derivation_path: &str,
+) -> sqlx::Result<Vec<UserPickerRow>> {
+    #[derive(sqlx::FromRow)]
+    struct Joined {
+        id: Uuid,
+        email: String,
+        password_hash: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+        has_p2wsh_signer: bool,
+    }
+
+    let rows = sqlx::query_as::<_, Joined>(
+        "SELECT u.id, u.email, u.password_hash, u.created_at, \
+                EXISTS ( \
+                  SELECT 1 FROM signers s \
+                  WHERE s.user_id = u.id AND s.derivation_path = $1 \
+                ) AS has_p2wsh_signer \
+         FROM users u \
+         ORDER BY u.email ASC",
+    )
+    .bind(derivation_path)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| UserPickerRow {
+            user: UserRow {
+                id: r.id,
+                email: r.email,
+                password_hash: r.password_hash,
+                created_at: r.created_at,
+            },
+            has_p2wsh_signer: r.has_p2wsh_signer,
+        })
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // federations
 // ---------------------------------------------------------------------------
+
+/// Inputs to [`insert_federation_with_members`]. Mirrors the non-derived
+/// columns of `federations` so callers can compute them once (descriptor,
+/// snapshot, etc.) and pass a single struct rather than a long positional
+/// argument list.
+#[derive(Debug, Clone)]
+pub struct NewFederation<'a> {
+    /// Human-readable label.
+    pub label: &'a str,
+    /// `m` of an m-of-n federation.
+    pub threshold: i32,
+    /// `n` of an m-of-n federation.
+    pub total_signers: i32,
+    /// Bitcoin network string (matches BDK's `Network::to_string()`).
+    pub network: &'a str,
+    /// Multipath descriptor (`wsh(sortedmulti(m, ...))` with `/<0;1>/*`).
+    pub descriptor: &'a str,
+    /// Canonical `FederationSnapshot` JSON.
+    pub snapshot_json: &'a JsonValue,
+}
+
+/// Atomically insert a federation row and one `federation_members` row per
+/// member. Every member is recorded with `role = 'trustee'`. The order of
+/// `members` determines `joined_at` order (oldest first).
+///
+/// # Errors
+/// Propagates any underlying SQL error. Rolls back on any failure mid-way.
+pub async fn insert_federation_with_members(
+    pool: &PgPool,
+    spec: &NewFederation<'_>,
+    members: &[(Uuid, Uuid)],
+) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+
+    let federation_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO federations \
+            (label, threshold, total_signers, network, descriptor, snapshot_json) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         RETURNING id",
+    )
+    .bind(spec.label)
+    .bind(spec.threshold)
+    .bind(spec.total_signers)
+    .bind(spec.network)
+    .bind(spec.descriptor)
+    .bind(spec.snapshot_json)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for (user_id, signer_id) in members {
+        sqlx::query(
+            "INSERT INTO federation_members \
+                (federation_id, user_id, signer_id, role) \
+             VALUES ($1, $2, $3, 'trustee')",
+        )
+        .bind(federation_id)
+        .bind(user_id)
+        .bind(signer_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(federation_id)
+}
 
 /// Federations `user_id` is a member of, most recently created first.
 ///

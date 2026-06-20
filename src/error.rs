@@ -9,6 +9,8 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+use asterism_core::DescriptorError;
+
 use crate::wallet::WalletError;
 
 /// Top-level error type for the web app.
@@ -45,6 +47,26 @@ pub enum AppError {
     /// Bad input from the user (400). Carries the user-visible reason.
     #[error("bad request: {0}")]
     BadRequest(String),
+
+    /// Federation-creation form failed input validation (label empty,
+    /// threshold out of range, too few members, etc.). 400 with the
+    /// embedded message echoed to the user.
+    #[error("invalid federation: {0}")]
+    BadFederationInput(String),
+
+    /// One or more picked users do not have a P2WSH signer on file at the
+    /// configured derivation path, so they cannot contribute a key.
+    /// Carries the offending emails so the response can name them.
+    #[error("federation members missing onboarded hardware wallets: {}", .emails.join(", "))]
+    MissingMemberSigner {
+        /// Email addresses of users who lack a P2WSH signer.
+        emails: Vec<String>,
+    },
+
+    /// `asterism-core`'s [`DescriptorBuilder`](asterism_core::DescriptorBuilder)
+    /// rejected the assembled inputs — duplicate keys, network mismatch, etc.
+    #[error("descriptor builder rejected federation: {0}")]
+    DescriptorBuilderRejected(#[from] DescriptorError),
 }
 
 impl From<password_hash::Error> for AppError {
@@ -67,6 +89,30 @@ impl IntoResponse for AppError {
             Self::BadRequest(msg) => {
                 tracing::debug!(reason = %msg, "400");
                 (StatusCode::BAD_REQUEST, msg.clone()).into_response()
+            }
+            Self::BadFederationInput(msg) => {
+                tracing::debug!(reason = %msg, "400 bad federation input");
+                (StatusCode::BAD_REQUEST, msg.clone()).into_response()
+            }
+            Self::MissingMemberSigner { emails } => {
+                tracing::debug!(?emails, "400 missing member signer");
+                let list = emails.join(", ");
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "User(s) {list} have no hardware wallet onboarded. \
+                         Have them log in and onboard a Trezor first."
+                    ),
+                )
+                    .into_response()
+            }
+            Self::DescriptorBuilderRejected(e) => {
+                tracing::debug!(error = %e, "400 descriptor rejected");
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Cannot build federation descriptor: {e}"),
+                )
+                    .into_response()
             }
             Self::Wallet(WalletError::NotFound(_)) => {
                 tracing::debug!(error = %self, "404");

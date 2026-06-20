@@ -50,9 +50,12 @@
 </section>
 
 <section class="card">
-  <h2>Your federations</h2>
+  <div class="section-header">
+    <h2>Your federations</h2>
+    <a href="/federations/new" class="btn btn-primary">Create federation</a>
+  </div>
   {% if federations.is_empty() %}
-    <p class="muted">You are not a member of any federation yet. Once a federation is constructed and you're added as a member, it will appear here.</p>
+    <p class="muted">You are not a member of any federation yet. Create one above, or wait to be added as a cosigner.</p>
   {% else %}
     <table class="data">
       <thead>

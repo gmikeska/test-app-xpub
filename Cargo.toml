@@ -70,6 +70,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
+axum-extra = { version = "0.12.6", features = ["form"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
