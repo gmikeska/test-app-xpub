@@ -8,8 +8,9 @@ publish = false
 
 [dependencies]
 # Asterism library — XPUB ingestion + Signer/Federation/snapshot
-asterism-core = { path = "../asterism-core" }
+asterism-core = { path = "../asterism-core", features = ["elements"] }
 asterism-xpub = { path = "../asterism-xpub" }
+asterism-elements = { path = "../asterism-elements" }
 bitcoin = "0.32"
 miniscript = "12"
 
@@ -19,6 +20,16 @@ miniscript = "12"
 bdk_wallet = { version = "3.1", features = ["std"] }
 bdk_bitcoind_rpc = "0.22"
 bitcoincore-rpc = "0.19"
+
+# Elements / Liquid — version-pinned to match `asterism-elements`. LWK's
+# `Wollet` is the source of truth for Liquid wallet state (UTXO tracking,
+# CT-address derivation, PSET construction). We enable the `esplora` feature
+# so we can drive sync from `ELEMENTS_ESPLORA_URL`.
+elements = { version = "0.25", features = ["serde"] }
+elements-miniscript = { version = "0.4", features = ["serde"] }
+lwk_wollet = { version = "0.18", default-features = false, features = ["esplora"] }
+secp256k1-zkp = { version = "0.11", features = ["std", "global-context", "rand"] }
+rand = "0.8"
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

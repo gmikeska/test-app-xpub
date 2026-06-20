@@ -228,6 +228,7 @@
     try {
       const body = {
         descriptor_key: pending.descriptor_key,
+        device_type: "Trezor",
         label: (labelInput.value || "").trim() || null,
       };
       const resp = await fetch("/onboard/signer", {

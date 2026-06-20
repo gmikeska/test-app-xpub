@@ -8,6 +8,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
+use asterism_elements::ElementsNetwork;
 use bitcoin::Network;
 
 /// Top-level configuration for the web app.
@@ -40,6 +41,14 @@ pub struct AppConfig {
     /// Currently unused by the BDK descriptor wallet path, but kept for
     /// future RPC calls that require a wallet context.
     pub bitcoin_wallet_name: String,
+    /// Optional Liquid / Elements network. When `None`, Liquid federation
+    /// creation is disabled in the UI. When `Some`, Liquid federations
+    /// can be created on the configured network.
+    pub elements_network: Option<ElementsNetwork>,
+    /// Optional Esplora endpoint for Liquid sync. When `None`, Liquid
+    /// wallets surface a "no indexer configured" warning rather than
+    /// running sync.
+    pub elements_esplora_url: Option<String>,
 }
 
 impl AppConfig {
@@ -107,6 +116,12 @@ impl AppConfig {
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "asterism-xpub".to_string());
 
+        let elements_network = match optional("ELEMENTS_NETWORK").as_deref() {
+            None => None,
+            Some(s) => Some(parse_elements_network(s)?),
+        };
+        let elements_esplora_url = optional("ELEMENTS_ESPLORA_URL");
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -120,7 +135,23 @@ impl AppConfig {
             bitcoin_rpc_user,
             bitcoin_rpc_password,
             bitcoin_wallet_name,
+            elements_network,
+            elements_esplora_url,
         })
+    }
+}
+
+fn parse_elements_network(s: &str) -> Result<ElementsNetwork, ConfigError> {
+    match s {
+        "liquid" => Ok(ElementsNetwork::Liquid),
+        "liquidtestnet" | "liquid_testnet" => Ok(ElementsNetwork::LiquidTestnet),
+        "elementsregtest" | "elements_regtest" => Ok(ElementsNetwork::ElementsRegtest),
+        other => Err(ConfigError::Parse {
+            var: "ELEMENTS_NETWORK",
+            reason: format!(
+                "expected one of `liquid`, `liquidtestnet`, `elementsregtest`; got `{other}`"
+            ),
+        }),
     }
 }
 

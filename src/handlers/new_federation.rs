@@ -21,17 +21,21 @@ use askama_web::WebTemplate;
 use axum::extract::State;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use asterism_core::descriptor::{KeyMode, to_multipath_string};
 use asterism_core::{DescriptorBuilder, Federation, FederationSnapshot, NetworkType};
-use asterism_xpub::{DeviceType, ExternalSigner};
+use asterism_elements::descriptor::to_multipath_string as ct_to_multipath_string;
+use asterism_elements::{CtDescriptorBuilder, CtKeyMode, ElementsNetwork};
+use asterism_xpub::ExternalSigner;
 
 use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db::{self, NewFederation, UserPickerRow};
 use crate::error::AppError;
+use crate::handlers::common::parse_device_type;
 use crate::models::SignerRow;
 
 /// Hard cap on the federation label length. The schema is `TEXT` (no
@@ -59,6 +63,13 @@ struct NewFederationTemplate {
     network: String,
     /// One row per candidate user, oldest-by-email order.
     candidates: Vec<CandidateView>,
+    /// `true` iff `ELEMENTS_NETWORK` is configured on the server. Drives
+    /// visibility of the Bitcoin/Liquid radio in the form.
+    liquid_available: bool,
+    /// Display name of the configured Elements network (`"liquid"`,
+    /// `"liquidtestnet"`, `"elementsregtest"`). Empty when
+    /// [`Self::liquid_available`] is `false`.
+    elements_network_label: String,
 }
 
 /// One row in the candidate-user picker.
@@ -103,12 +114,21 @@ pub async fn new_federation_get(
         )
         .collect();
 
+    let liquid_available = state.elements_wallets.elements_enabled();
+    let elements_network_label = state
+        .config
+        .elements_network
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+
     Ok(NewFederationTemplate {
         creator_id: user.id,
         email: user.email,
         derivation_path: path.clone(),
         network: state.config.network.to_string(),
         candidates,
+        liquid_available,
+        elements_network_label,
     }
     .into_response())
 }
@@ -131,6 +151,15 @@ pub struct NewFederationForm {
     /// would otherwise fail to deserialize a missing field into a `Vec`.
     #[serde(default)]
     pub member_ids: Vec<Uuid>,
+    /// Network family. `"bitcoin"` (BDK pipeline) or `"liquid"` (LWK
+    /// pipeline). Defaults to `"bitcoin"` so existing form submissions
+    /// without this field continue to work.
+    #[serde(default = "default_network_kind")]
+    pub network_kind: String,
+}
+
+fn default_network_kind() -> String {
+    "bitcoin".to_string()
 }
 
 /// `POST /federations`
@@ -151,6 +180,25 @@ pub async fn new_federation_post(
     Form(body): Form<NewFederationForm>,
 ) -> Result<Response, AppError> {
     let label = sanitise_label(&body.label)?;
+
+    let kind = match body.network_kind.as_str() {
+        "bitcoin" | "" => NetworkKind::Bitcoin,
+        "liquid" => {
+            if !state.elements_wallets.elements_enabled() {
+                return Err(AppError::BadFederationInput(
+                    "Liquid is not enabled on this server (set ELEMENTS_NETWORK in the env to \
+                     enable it)."
+                        .into(),
+                ));
+            }
+            NetworkKind::Liquid
+        }
+        other => {
+            return Err(AppError::BadFederationInput(format!(
+                "Unknown network kind `{other}` (expected `bitcoin` or `liquid`).",
+            )));
+        }
+    };
 
     let member_ids = dedupe_and_force_include_creator(body.member_ids, user.id);
     let n = i32::try_from(member_ids.len())
@@ -191,10 +239,67 @@ pub async fn new_federation_post(
         external_signers.push(s);
     }
 
-    let network_type = NetworkType::Bitcoin(state.config.network);
     let threshold_u32 = u32::try_from(body.threshold).map_err(|_| {
         AppError::BadFederationInput(format!("Threshold {} out of range.", body.threshold))
     })?;
+
+    let federation_id = match kind {
+        NetworkKind::Bitcoin => {
+            create_bitcoin_federation(
+                state.clone(),
+                &label,
+                body.threshold,
+                threshold_u32,
+                n,
+                external_signers,
+                &resolved,
+            )
+            .await?
+        }
+        NetworkKind::Liquid => {
+            create_liquid_federation(
+                state.clone(),
+                &label,
+                body.threshold,
+                threshold_u32,
+                n,
+                external_signers,
+                &resolved,
+            )
+            .await?
+        }
+    };
+
+    tracing::info!(
+        federation_id = %federation_id,
+        creator = %user.email,
+        label = %label,
+        threshold = body.threshold,
+        total_signers = n,
+        kind = ?kind,
+        "federation created"
+    );
+
+    Ok(Redirect::to(&format!("/federations/{federation_id}")).into_response())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NetworkKind {
+    Bitcoin,
+    Liquid,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_bitcoin_federation(
+    state: Arc<AppState>,
+    label: &str,
+    threshold: i32,
+    threshold_u32: u32,
+    total_signers: i32,
+    external_signers: Vec<ExternalSigner>,
+    resolved: &[(Uuid, SignerRow)],
+) -> Result<Uuid, AppError> {
+    let network_type = NetworkType::Bitcoin(state.config.network);
 
     let mut builder = DescriptorBuilder::new(threshold_u32, network_type).key_mode(KeyMode::Ranged);
     for s in &external_signers {
@@ -214,26 +319,80 @@ pub async fn new_federation_post(
 
     let network_str = state.config.network.to_string();
     let spec = NewFederation {
-        label: &label,
-        threshold: body.threshold,
-        total_signers: n,
+        label,
+        threshold,
+        total_signers,
         network: &network_str,
         descriptor: &descriptor_string,
         snapshot_json: &snapshot_json,
+        master_blinding_key: None,
     };
     let members: Vec<(Uuid, Uuid)> = resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
     let federation_id = db::insert_federation_with_members(&state.db, &spec, &members).await?;
+    Ok(federation_id)
+}
 
-    tracing::info!(
-        federation_id = %federation_id,
-        creator = %user.email,
-        label = %label,
-        threshold = body.threshold,
-        total_signers = n,
-        "federation created"
-    );
+#[allow(clippy::too_many_arguments)]
+async fn create_liquid_federation(
+    state: Arc<AppState>,
+    label: &str,
+    threshold: i32,
+    threshold_u32: u32,
+    total_signers: i32,
+    external_signers: Vec<ExternalSigner>,
+    resolved: &[(Uuid, SignerRow)],
+) -> Result<Uuid, AppError> {
+    let elements_net: ElementsNetwork = state
+        .config
+        .elements_network
+        .ok_or_else(|| AppError::BadFederationInput("ELEMENTS_NETWORK not configured.".into()))?;
 
-    Ok(Redirect::to(&format!("/federations/{federation_id}")).into_response())
+    // Generate a 32-byte SLIP-77 master blinding key. In production
+    // deployments the key would be derived from each user's hardware
+    // wallet (e.g. Jade's `getMasterBlindingKey`); for this dev app we
+    // generate it server-side so all cosigners on the same server share
+    // the view.
+    let mut mbk = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut mbk);
+
+    let mut builder = CtDescriptorBuilder::new(threshold_u32, &mbk)?.key_mode(CtKeyMode::Ranged);
+    for s in &external_signers {
+        builder.add_signer(s)?;
+    }
+    let ct_desc = builder.build()?;
+    let descriptor_string = ct_to_multipath_string(&ct_desc);
+
+    let network_type: NetworkType = elements_net.into();
+    // Re-use Federation<ExternalSigner>; the `ElementsSigner` trait isn't
+    // implemented for plain `ExternalSigner` (signing happens browser-side
+    // via Jade), so we keep this as a pure data carrier for the snapshot.
+    let federation = Federation::new(threshold_u32, external_signers, network_type)
+        .map_err(|e| AppError::BadFederationInput(format!("Cannot construct federation: {e}")))?;
+
+    let snapshot_json: serde_json::Value =
+        serde_json::from_str(&FederationSnapshot::from_federation(&federation).to_canonical_json())
+            .map_err(|e| {
+                AppError::BadFederationInput(format!("Failed to serialise snapshot: {e}"))
+            })?;
+
+    let network_str = match elements_net {
+        ElementsNetwork::Liquid => "liquid",
+        ElementsNetwork::LiquidTestnet => "liquidtestnet",
+        ElementsNetwork::ElementsRegtest => "elementsregtest",
+    };
+
+    let spec = NewFederation {
+        label,
+        threshold,
+        total_signers,
+        network: network_str,
+        descriptor: &descriptor_string,
+        snapshot_json: &snapshot_json,
+        master_blinding_key: Some(&mbk),
+    };
+    let members: Vec<(Uuid, Uuid)> = resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
+    let federation_id = db::insert_federation_with_members(&state.db, &spec, &members).await?;
+    Ok(federation_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,21 +452,3 @@ async fn resolve_member_signers(
     }
 }
 
-/// Map the `signers.device_type` column back into the typed
-/// [`DeviceType`] that [`ExternalSigner::from_descriptor_key`] expects.
-///
-/// The column is populated by [`crate::handlers::onboard`] via
-/// `format!("{:?}", signer.device_type())`, so the round-trip is:
-/// `DeviceType::Trezor` → `"Trezor"` → `DeviceType::Trezor`. Any value
-/// we don't recognise falls through to [`DeviceType::Generic`] rather
-/// than failing the federation build.
-fn parse_device_type(s: &str) -> DeviceType {
-    match s {
-        "Trezor" => DeviceType::Trezor,
-        "Jade" => DeviceType::Jade,
-        "PassportPrime" => DeviceType::PassportPrime,
-        "Ledger" => DeviceType::Ledger,
-        "Coldcard" => DeviceType::Coldcard,
-        _ => DeviceType::Generic,
-    }
-}

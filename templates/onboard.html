@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Onboard your Trezor — Asterism{% endblock %}
+{% block title %}Onboard your hardware wallet — Asterism{% endblock %}
 
 {% block nav %}
   <span class="user">{{ email }}</span>
@@ -21,46 +21,118 @@
   </script>
   <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
   <script src="/static/onboard.js" defer></script>
+  <script src="/static/onboard-jade.js" type="module"></script>
 {% endblock %}
 
 {% block content %}
 <section class="card">
-  <h1>Onboard your Trezor</h1>
-  <p>Welcome, <strong>{{ email }}</strong>. To finish setting up your account we need to capture the extended public key (XPUB) from your Trezor at the federation derivation path. The device stays in your hands — this app never sees your seed or your private keys.</p>
+  <h1>Onboard your hardware wallet</h1>
+  <p>Welcome, <strong>{{ email }}</strong>. Pick the device you'll use as your federation signer. Your seed and private keys never leave the device — this app only sees the extended public key (XPUB).</p>
 
   <dl class="kv">
     <dt>Network</dt><dd><code>{{ network }}</code></dd>
     <dt>Derivation path</dt><dd><code>{{ derivation_path }}</code></dd>
-    <dt>Trezor coin</dt><dd><code>{{ trezor_coin }}</code></dd>
   </dl>
 
-  <form id="onboard-form" class="form">
-    <label>
-      <span>Label (optional)</span>
-      <input type="text" name="label" id="label" placeholder="e.g. My Trezor Model T" maxlength="64">
+  <fieldset class="form" style="border:1px solid var(--border); border-radius:6px; padding:12px 16px;">
+    <legend style="padding:0 8px; color:var(--muted);">Device</legend>
+    <label style="flex-direction:row; align-items:center; gap:8px;">
+      <input type="radio" name="device-pick" value="trezor" checked>
+      <span style="font-size:1rem; color:var(--text);">Trezor</span>
     </label>
-    <button type="button" id="capture-btn" class="btn btn-primary">Connect Trezor &amp; capture XPUB</button>
-  </form>
+    <label style="flex-direction:row; align-items:center; gap:8px;">
+      <input type="radio" name="device-pick" value="jade">
+      <span style="font-size:1rem; color:var(--text);">Blockstream Jade</span>
+    </label>
+  </fieldset>
 
-  <div id="status" class="status" role="status" aria-live="polite"></div>
-  <div id="result" class="result" hidden>
-    <h2>Captured</h2>
+  <!-- ---------------------------------------------------------------- -->
+  <!-- Trezor pane                                                      -->
+  <!-- ---------------------------------------------------------------- -->
+  <div id="device-pane-trezor" class="device-pane">
+    <h2 style="margin-top:24px;">Trezor</h2>
     <dl class="kv">
-      <dt>Fingerprint</dt><dd><code id="r-fp"></code></dd>
-      <dt>Derivation path</dt><dd><code id="r-path"></code></dd>
-      <dt>XPUB</dt><dd><code id="r-xpub" class="break"></code></dd>
-      <dt>Descriptor key</dt><dd><code id="r-dk" class="break"></code></dd>
+      <dt>Trezor coin</dt><dd><code>{{ trezor_coin }}</code></dd>
     </dl>
-    <button type="button" id="save-btn" class="btn btn-primary">Save and continue</button>
+    <form id="onboard-form" class="form">
+      <label>
+        <span>Label (optional)</span>
+        <input type="text" name="label" id="label" placeholder="e.g. My Trezor Model T" maxlength="64">
+      </label>
+      <button type="button" id="capture-btn" class="btn btn-primary">Connect Trezor &amp; capture XPUB</button>
+    </form>
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+    <div id="result" class="result" hidden>
+      <h2>Captured</h2>
+      <dl class="kv">
+        <dt>Fingerprint</dt><dd><code id="r-fp"></code></dd>
+        <dt>Derivation path</dt><dd><code id="r-path"></code></dd>
+        <dt>XPUB</dt><dd><code id="r-xpub" class="break"></code></dd>
+        <dt>Descriptor key</dt><dd><code id="r-dk" class="break"></code></dd>
+      </dl>
+      <button type="button" id="save-btn" class="btn btn-primary">Save and continue</button>
+    </div>
+    <details class="hint">
+      <summary>Trezor troubleshooting</summary>
+      <ul>
+        <li>Make sure the Trezor Bridge / WebUSB permission is granted.</li>
+        <li>Trezor Connect requires your Trezor to be unlocked.</li>
+        <li>If you're using the Trezor Emulator, set the emulator port in <code>connect.trezor.io/9/popup</code> dev mode.</li>
+      </ul>
+    </details>
   </div>
 
-  <details class="hint">
-    <summary>Troubleshooting</summary>
-    <ul>
-      <li>Make sure the Trezor Bridge / WebUSB permission is granted.</li>
-      <li>Trezor Connect requires your Trezor to be unlocked.</li>
-      <li>If you're using the Trezor Emulator, set the emulator port in <code>connect.trezor.io/9/popup</code> dev mode.</li>
-    </ul>
-  </details>
+  <!-- ---------------------------------------------------------------- -->
+  <!-- Jade pane                                                        -->
+  <!-- ---------------------------------------------------------------- -->
+  <div id="device-pane-jade" class="device-pane" hidden>
+    <h2 style="margin-top:24px;">Blockstream Jade</h2>
+    <p class="muted">Plug your Jade in via USB and ensure no other browser tab or app holds the serial port. The browser will prompt you to grant access to the device once you click below.</p>
+    <form id="onboard-form-jade" class="form">
+      <label>
+        <span>Label (optional)</span>
+        <input type="text" name="label" id="label-jade" placeholder="e.g. My Jade Plus" maxlength="64">
+      </label>
+      <button type="button" id="capture-btn-jade" class="btn btn-primary">Connect Jade &amp; capture XPUB</button>
+    </form>
+    <div id="status-jade" class="status" role="status" aria-live="polite"></div>
+    <div id="result-jade" class="result" hidden>
+      <h2>Captured</h2>
+      <dl class="kv">
+        <dt>Fingerprint</dt><dd><code id="r-fp-jade"></code></dd>
+        <dt>Derivation path</dt><dd><code id="r-path-jade"></code></dd>
+        <dt>XPUB</dt><dd><code id="r-xpub-jade" class="break"></code></dd>
+        <dt>Descriptor key</dt><dd><code id="r-dk-jade" class="break"></code></dd>
+      </dl>
+      <button type="button" id="save-btn-jade" class="btn btn-primary">Save and continue</button>
+    </div>
+    <details class="hint">
+      <summary>Jade troubleshooting</summary>
+      <ul>
+        <li>Use a Chromium-based desktop browser (Chrome, Edge, Brave) with Web Serial support.</li>
+        <li>Close any other tab or desktop app (Green, Sparrow, etc.) connected to the Jade.</li>
+        <li>The first unlock contacts Blockstream's pinserver — ensure you have a working internet connection.</li>
+        <li>Confirm the PIN on the device when prompted.</li>
+      </ul>
+    </details>
+  </div>
 </section>
+
+<script>
+  // Inline device-picker switch. Vanilla DOM, no module dependency, runs
+  // on initial page load so the pane visibility matches the radio state.
+  (function () {
+    "use strict";
+    const radios = document.querySelectorAll('input[name="device-pick"]');
+    const trezorPane = document.getElementById("device-pane-trezor");
+    const jadePane = document.getElementById("device-pane-jade");
+    function apply() {
+      const picked = (document.querySelector('input[name="device-pick"]:checked') || {}).value;
+      trezorPane.hidden = picked !== "trezor";
+      jadePane.hidden = picked !== "jade";
+    }
+    radios.forEach(function (r) { r.addEventListener("change", apply); });
+    apply();
+  })();
+</script>
 {% endblock %}

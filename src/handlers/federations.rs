@@ -25,7 +25,8 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::db;
+use crate::db::{self, FederationKind};
+use crate::elements_wallet::REVEAL_COUNT as ELEMENTS_REVEAL_COUNT;
 use crate::error::AppError;
 use crate::models::{ProposalRow, SignerRow};
 use crate::wallet::{REVEAL_COUNT, RevealedAddress};
@@ -45,6 +46,12 @@ pub struct FederationView {
     pub descriptor: String,
     pub created_at: String,
     pub tip_height: u32,
+    /// `true` iff this federation is on a Liquid (Elements) network.
+    /// Drives `BTC` vs `L-BTC` labels and Liquid-specific UI affordances
+    /// (no per-address detail page, no coin-selection breakdown, etc.).
+    pub is_liquid: bool,
+    /// Currency ticker shown in amount columns (`"BTC"` or `"L-BTC"`).
+    pub asset_ticker: String,
 }
 
 /// View-model for one cosigner row.
@@ -98,6 +105,26 @@ pub struct BalanceView {
 }
 
 impl BalanceView {
+    /// Build a [`BalanceView`] for a Liquid federation from a single
+    /// L-BTC sat total (LWK doesn't expose pending/immature buckets in
+    /// v1) plus the in-flight reservation total.
+    pub fn from_lbtc_sat(lbtc_sat: u64, reserved_sat: u64) -> Self {
+        let total = bitcoin::Amount::from_sat(lbtc_sat);
+        let reserved = bitcoin::Amount::from_sat(reserved_sat);
+        let spendable = total.checked_sub(reserved).unwrap_or(bitcoin::Amount::ZERO);
+        Self {
+            confirmed_btc: format_btc(total),
+            trusted_pending_btc: format_btc(bitcoin::Amount::ZERO),
+            untrusted_pending_btc: format_btc(bitcoin::Amount::ZERO),
+            immature_btc: format_btc(bitcoin::Amount::ZERO),
+            spendable_btc: format_btc(spendable),
+            total_btc: format_btc(total),
+            reserved_btc: format_btc(reserved),
+            has_pending: false,
+            has_reserved: reserved_sat > 0,
+        }
+    }
+
     /// Build a [`BalanceView`] from BDK's on-chain balance and the
     /// in-flight reservation total (sats) returned by
     /// [`crate::db::sum_inflight_inputs_for_federation`].
@@ -186,24 +213,9 @@ pub async fn receive(
 ) -> Result<Response, AppError> {
     let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
 
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let sync = fw.sync().await?;
-    tracing::debug!(
-        federation_id = %federation_id,
-        tip = sync.tip_height,
-        new_blocks = sync.new_blocks,
-        new_mempool_txs = sync.new_mempool_txs,
-        "synced federation wallet",
-    );
-
-    let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
-    let addresses = addresses_raw.into_iter().map(AddressView::from).collect();
-    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
-
-    let federation = FederationView {
-        tip_height: sync.tip_height,
-        ..federation
+    let (federation, balance, addresses) = match federation_kind(&federation) {
+        FederationKind::Bitcoin => receive_bitcoin(&state, federation_id, federation).await?,
+        FederationKind::Liquid => receive_liquid(&state, federation_id, federation).await?,
     };
 
     Ok(ReceiveTemplate {
@@ -217,6 +229,77 @@ pub async fn receive(
     .into_response())
 }
 
+async fn receive_bitcoin(
+    state: &Arc<AppState>,
+    federation_id: Uuid,
+    federation: FederationView,
+) -> Result<(FederationView, BalanceView, Vec<AddressView>), AppError> {
+    let fw = state.wallets.load_or_init(federation_id).await?;
+    let sync = fw.sync().await?;
+    tracing::debug!(
+        federation_id = %federation_id,
+        tip = sync.tip_height,
+        new_blocks = sync.new_blocks,
+        new_mempool_txs = sync.new_mempool_txs,
+        "synced federation wallet",
+    );
+
+    let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
+    let addresses: Vec<AddressView> = addresses_raw.into_iter().map(AddressView::from).collect();
+    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
+
+    Ok((
+        FederationView {
+            tip_height: sync.tip_height,
+            ..federation
+        },
+        balance,
+        addresses,
+    ))
+}
+
+async fn receive_liquid(
+    state: &Arc<AppState>,
+    federation_id: Uuid,
+    federation: FederationView,
+) -> Result<(FederationView, BalanceView, Vec<AddressView>), AppError> {
+    let fw = state.elements_wallets.load_or_init(federation_id).await?;
+    let sync = fw.sync().await?;
+    tracing::debug!(
+        federation_id = %federation_id,
+        tip = sync.tip_height,
+        applied_update = sync.applied_update,
+        "synced Liquid federation wallet",
+    );
+
+    let addresses_raw = fw.reveal_addresses(ELEMENTS_REVEAL_COUNT).await?;
+    let addresses: Vec<AddressView> = addresses_raw
+        .into_iter()
+        .map(|a| AddressView {
+            index: a.index,
+            address: a.address,
+            // LWK doesn't track per-address received/unspent in v1; we
+            // surface zero so the table renders without a sentinel
+            // string that templates might trip on.
+            received_btc: format_btc_sats(0),
+            unspent_btc: format_btc_sats(0),
+        })
+        .collect();
+    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let lbtc_sat = fw.lbtc_balance_sat().await?;
+    let balance = BalanceView::from_lbtc_sat(lbtc_sat, reserved_sat);
+
+    Ok((
+        FederationView {
+            tip_height: sync.tip_height,
+            ..federation
+        },
+        balance,
+        addresses,
+    ))
+}
+
 /// `GET /federations/:id/send`
 pub async fn send(
     State(state): State<Arc<AppState>>,
@@ -225,15 +308,36 @@ pub async fn send(
 ) -> Result<Response, AppError> {
     let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
 
-    // We still drive a sync on the Send tab so balances reflected in BDK's
-    // coin-selection are fresh.
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let sync = fw.sync().await?;
-    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
-    let federation = FederationView {
-        tip_height: sync.tip_height,
-        ..federation
+    let (federation, balance) = match federation_kind(&federation) {
+        FederationKind::Bitcoin => {
+            let fw = state.wallets.load_or_init(federation_id).await?;
+            let sync = fw.sync().await?;
+            let reserved_sat =
+                db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+            let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
+            (
+                FederationView {
+                    tip_height: sync.tip_height,
+                    ..federation
+                },
+                balance,
+            )
+        }
+        FederationKind::Liquid => {
+            let fw = state.elements_wallets.load_or_init(federation_id).await?;
+            let sync = fw.sync().await?;
+            let reserved_sat =
+                db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+            let lbtc_sat = fw.lbtc_balance_sat().await?;
+            let balance = BalanceView::from_lbtc_sat(lbtc_sat, reserved_sat);
+            (
+                FederationView {
+                    tip_height: sync.tip_height,
+                    ..federation
+                },
+                balance,
+            )
+        }
     };
 
     let proposal_rows = db::list_proposals_for_federation(&state.db, federation_id).await?;
@@ -248,6 +352,16 @@ pub async fn send(
         active_tab: "send",
     }
     .into_response())
+}
+
+/// Lookup helper: retrieve the [`FederationKind`] from a built
+/// [`FederationView`] without re-querying the DB.
+fn federation_kind(view: &FederationView) -> FederationKind {
+    if view.is_liquid {
+        FederationKind::Liquid
+    } else {
+        FederationKind::Bitcoin
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +393,9 @@ pub async fn load_header(
         .map(|(u, s)| build_cosigner_view(&u.email, s, user_id == u.id))
         .collect::<Vec<_>>();
 
+    let kind = FederationKind::from_row(&row);
+    let is_liquid = kind.is_liquid();
+    let asset_ticker = if is_liquid { "L-BTC" } else { "BTC" }.to_string();
     let federation = FederationView {
         id: row.id,
         label: row.label,
@@ -292,6 +409,8 @@ pub async fn load_header(
             .chain_tip_height
             .and_then(|h| u32::try_from(h).ok())
             .unwrap_or(0),
+        is_liquid,
+        asset_ticker,
     };
 
     Ok((federation, cosigners))

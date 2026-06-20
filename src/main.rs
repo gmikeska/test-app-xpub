@@ -12,6 +12,7 @@
 mod auth;
 mod config;
 mod db;
+mod elements_wallet;
 mod error;
 mod handlers;
 mod models;
@@ -39,6 +40,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use crate::config::AppConfig;
+use crate::elements_wallet::LwkWalletManager;
 use crate::wallet::WalletManager;
 
 /// Application state injected into every handler.
@@ -50,6 +52,8 @@ pub struct AppState {
     pub db: PgPool,
     /// Per-federation BDK wallet cache + Bitcoin Core RPC client.
     pub wallets: Arc<WalletManager>,
+    /// Per-federation LWK wallet cache + Esplora client (Liquid).
+    pub elements_wallets: Arc<LwkWalletManager>,
 }
 
 // Boot sequence is linear and well-commented; splitting just to satisfy the
@@ -111,10 +115,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Bitcoin Core RPC client ready",
     );
 
+    let elements_wallets = Arc::new(LwkWalletManager::new(pool.clone(), &config));
+    if let Some(net) = config.elements_network {
+        tracing::info!(
+            elements_network = %net,
+            esplora = %config
+                .elements_esplora_url
+                .clone()
+                .unwrap_or_else(|| "<none>".to_string()),
+            "Liquid (LWK) wallet manager ready",
+        );
+    } else {
+        tracing::info!("ELEMENTS_NETWORK not set; Liquid federations are disabled");
+    }
+
     let state = Arc::new(AppState {
         config: config.clone(),
         db: pool,
         wallets,
+        elements_wallets,
     });
 
     // Resolve `static/` relative to the crate root so the binary works
@@ -170,6 +189,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/federations/{id}/proposals/{pid}/signatures",
             post(handlers::proposals::submit_signature),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/partial-psbt",
+            post(handlers::proposals::submit_partial_psbt),
         )
         .route(
             "/federations/{id}/proposals/{pid}/rejections",

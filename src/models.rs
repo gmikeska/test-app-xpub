@@ -54,18 +54,39 @@ pub struct FederationRow {
     pub threshold: i32,
     /// `n` value (total signers).
     pub total_signers: i32,
-    /// Bitcoin network the federation operates on.
+    /// Network identifier:
+    ///
+    /// - Bitcoin federations: `"bitcoin"`, `"testnet"`, `"signet"`, `"regtest"`
+    ///   (matches `bdk_wallet::Network`'s display).
+    /// - Liquid federations: `"liquid"`, `"liquidtestnet"`, `"elementsregtest"`.
+    ///
+    /// Use [`crate::db::FederationKind::from_network_str`] to discriminate.
     pub network: String,
-    /// `wsh(sortedmulti(...))` descriptor.
+    /// `wsh(sortedmulti(...))` (Bitcoin) or
+    /// `ct(slip77(...), elwsh(sortedmulti(...)))` (Liquid) descriptor.
     pub descriptor: String,
     /// Canonical `FederationSnapshot` JSON.
     pub snapshot_json: serde_json::Value,
     /// JSON-encoded `bdk_wallet::ChangeSet`. `None` until the federation's
     /// BDK wallet has been initialised at least once.
+    ///
+    /// Always `None` for Liquid federations — LWK has no `ChangeSet` shape;
+    /// see [`Self::next_external_index`] / [`Self::next_internal_index`].
     pub bdk_changeset: Option<serde_json::Value>,
-    /// Cached chain tip height (from the BDK wallet's local chain) for
+    /// Cached chain tip height (from the BDK / LWK local chain) for
     /// display on the federation page. `None` before the first sync.
     pub chain_tip_height: Option<i32>,
+    /// 32-byte SLIP-77 master blinding key for Liquid federations. `None`
+    /// for Bitcoin.
+    pub master_blinding_key: Option<Vec<u8>>,
+    /// Next address index to reveal on the external (`/0/*`) keychain.
+    /// LWK has no `ChangeSet`-style persistence so we track this on the
+    /// federation row directly. Ignored for Bitcoin federations (BDK
+    /// round-trips this through `bdk_changeset`).
+    pub next_external_index: i32,
+    /// Next address index to reveal on the internal (`/1/*`, change)
+    /// keychain. See [`Self::next_external_index`].
+    pub next_internal_index: i32,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
 }

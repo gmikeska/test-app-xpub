@@ -3,7 +3,11 @@
 {% block tab_body %}
 <section class="card">
   <h2>Receive addresses</h2>
-  <p class="muted">First {{ addresses.len() }} addresses on the external keychain (BIP-48 multisig). Click any address to view receipts.</p>
+  {% if federation.is_liquid %}
+    <p class="muted">First {{ addresses.len() }} confidential addresses on the external keychain (BIP-48 multisig + SLIP-77). Per-address balances are not tracked by LWK in this app.</p>
+  {% else %}
+    <p class="muted">First {{ addresses.len() }} addresses on the external keychain (BIP-48 multisig). Click any address to view receipts.</p>
+  {% endif %}
   {% if addresses.is_empty() %}
     <p class="muted">No addresses derived yet.</p>
   {% else %}
@@ -12,8 +16,8 @@
         <tr>
           <th>#</th>
           <th>Address</th>
-          <th>Received (BTC)</th>
-          <th>Unspent (BTC)</th>
+          <th>Received ({{ federation.asset_ticker }})</th>
+          <th>Unspent ({{ federation.asset_ticker }})</th>
         </tr>
       </thead>
       <tbody>
@@ -21,9 +25,13 @@
           <tr>
             <td>{{ a.index }}</td>
             <td>
-              <a href="/federations/{{ federation.id }}/addresses/{{ a.address }}">
-                <code>{{ a.address }}</code>
-              </a>
+              {% if federation.is_liquid %}
+                <code class="break">{{ a.address }}</code>
+              {% else %}
+                <a href="/federations/{{ federation.id }}/addresses/{{ a.address }}">
+                  <code>{{ a.address }}</code>
+                </a>
+              {% endif %}
             </td>
             <td>{{ a.received_btc }}</td>
             <td>{{ a.unspent_btc }}</td>

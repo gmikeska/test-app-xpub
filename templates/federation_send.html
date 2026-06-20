@@ -3,15 +3,19 @@
 {% block tab_body %}
 <section class="card">
   <h2>New proposal</h2>
-  <p class="muted">Build an unsigned PSBT with BDK's coin selection. After it's created, cosigners can sign with their Trezor.</p>
+  {% if federation.is_liquid %}
+    <p class="muted">Build an unsigned PSET with LWK's coin selection. Once created, cosigners with Jade can sign.</p>
+  {% else %}
+    <p class="muted">Build an unsigned PSBT with BDK's coin selection. After it's created, cosigners can sign with their Trezor or Jade.</p>
+  {% endif %}
   <form method="post" action="/federations/{{ federation.id }}/proposals" class="stack-form">
     <label>
       <span>Recipient address</span>
       <input type="text" name="recipient_address" required autocomplete="off" spellcheck="false"
-             placeholder="bcrt1q…">
+             {% if federation.is_liquid %}placeholder="el1q… / lq1q… / vjT…"{% else %}placeholder="bcrt1q…"{% endif %}>
     </label>
     <label>
-      <span>Amount (BTC)</span>
+      <span>Amount ({{ federation.asset_ticker }})</span>
       <input type="text" name="amount_btc" required autocomplete="off"
              placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
     </label>

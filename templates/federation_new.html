@@ -12,7 +12,7 @@
 {% block content %}
 <section class="card">
   <h1>Create a federation</h1>
-  <p class="muted">Pick the cosigners and threshold for a new <code>wsh(sortedmulti)</code> federation on <code>{{ network }}</code>. Every cosigner contributes the P2WSH xpub at <code>{{ derivation_path }}</code> they onboarded with their Trezor.</p>
+  <p class="muted">Pick the cosigners and threshold for a new federation. Bitcoin federations use <code>wsh(sortedmulti)</code> on <code>{{ network }}</code>; Liquid federations use <code>ct(slip77(...), elwsh(sortedmulti))</code>{% if liquid_available %} on <code>{{ elements_network_label }}</code>{% endif %}. Every cosigner contributes the BIP-48 xpub at <code>{{ derivation_path }}</code> they onboarded — the same xpub works for both Bitcoin and Liquid on testnet/regtest.</p>
 </section>
 
 <section class="card">
@@ -23,6 +23,22 @@
       <input type="text" name="label" required maxlength="100" autocomplete="off"
              placeholder="e.g. Treasury 2-of-3">
     </label>
+
+    {% if liquid_available %}
+    <fieldset class="network-picker" style="border:1px solid var(--border); border-radius:6px; padding:12px 16px;">
+      <legend style="padding:0 8px; color:var(--muted);">Network</legend>
+      <label style="flex-direction:row; align-items:center; gap:8px;">
+        <input type="radio" name="network_kind" value="bitcoin" checked>
+        <span>Bitcoin (<code>{{ network }}</code>)</span>
+      </label>
+      <label style="flex-direction:row; align-items:center; gap:8px;">
+        <input type="radio" name="network_kind" value="liquid">
+        <span>Liquid (<code>{{ elements_network_label }}</code>)</span>
+      </label>
+    </fieldset>
+    {% else %}
+      <input type="hidden" name="network_kind" value="bitcoin">
+    {% endif %}
 
     <label>
       <span>Threshold (m, signatures required)</span>

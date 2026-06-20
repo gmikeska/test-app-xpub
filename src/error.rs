@@ -10,7 +10,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use asterism_core::DescriptorError;
+use asterism_elements::CtDescriptorError;
 
+use crate::elements_wallet::ElementsWalletError;
 use crate::wallet::WalletError;
 
 /// Top-level error type for the web app.
@@ -67,6 +69,16 @@ pub enum AppError {
     /// rejected the assembled inputs — duplicate keys, network mismatch, etc.
     #[error("descriptor builder rejected federation: {0}")]
     DescriptorBuilderRejected(#[from] DescriptorError),
+
+    /// `asterism-elements`'s
+    /// [`CtDescriptorBuilder`](asterism_elements::CtDescriptorBuilder)
+    /// rejected the assembled inputs.
+    #[error("CT descriptor builder rejected federation: {0}")]
+    CtDescriptorBuilderRejected(#[from] CtDescriptorError),
+
+    /// LWK / Esplora / PSET error from the Liquid wallet layer.
+    #[error("Liquid wallet error: {0}")]
+    ElementsWallet(#[from] ElementsWalletError),
 }
 
 impl From<password_hash::Error> for AppError {
@@ -76,6 +88,7 @@ impl From<password_hash::Error> for AppError {
 }
 
 impl IntoResponse for AppError {
+    #[allow(clippy::too_many_lines)]
     fn into_response(self) -> Response {
         match &self {
             Self::NotFound(what) => {
@@ -154,6 +167,37 @@ impl IntoResponse for AppError {
                 (
                     StatusCode::BAD_GATEWAY,
                     format!("bitcoind rejected broadcast: {reason}"),
+                )
+                    .into_response()
+            }
+            Self::ElementsWallet(ElementsWalletError::NotFound(_)) => {
+                tracing::debug!(error = %self, "404");
+                (StatusCode::NOT_FOUND, "Liquid federation not found").into_response()
+            }
+            Self::ElementsWallet(
+                ElementsWalletError::BadAddress { .. }
+                | ElementsWalletError::BadAmount { .. }
+                | ElementsWalletError::BadPset(_)
+                | ElementsWalletError::MergePset(_)
+                | ElementsWalletError::Finalize(_)
+                | ElementsWalletError::BuildPset(_),
+            ) => {
+                tracing::debug!(error = %self, "400 Liquid wallet validation");
+                (StatusCode::BAD_REQUEST, format!("{self}")).into_response()
+            }
+            Self::ElementsWallet(ElementsWalletError::BroadcastRejected(reason)) => {
+                tracing::warn!(%reason, "502 Liquid broadcast rejected");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Esplora rejected broadcast: {reason}"),
+                )
+                    .into_response()
+            }
+            Self::CtDescriptorBuilderRejected(e) => {
+                tracing::debug!(error = %e, "400 CT descriptor rejected");
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Cannot build Liquid federation descriptor: {e}"),
                 )
                     .into_response()
             }

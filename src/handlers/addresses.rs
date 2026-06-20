@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::db;
+use crate::db::{self, FederationKind};
 use crate::error::AppError;
 use crate::wallet::{AddressReceipt, REVEAL_COUNT};
 
@@ -96,6 +96,14 @@ pub async fn show(
 
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
         return Err(AppError::Forbidden);
+    }
+
+    // LWK doesn't expose per-address activity in v1; the Liquid Receive
+    // page intentionally omits the address-link column.
+    if FederationKind::from_row(&row) == FederationKind::Liquid {
+        return Err(AppError::BadRequest(
+            "address detail is not available for Liquid federations".to_string(),
+        ));
     }
 
     let fw = state.wallets.load_or_init(federation_id).await?;
