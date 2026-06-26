@@ -1114,6 +1114,122 @@ mod versioning {
         tx.commit().await?;
         Ok(())
     }
+
+    /// Inputs to [`create_pending_migration`].
+    pub struct NewPendingMigration<'a> {
+        /// Lineage being migrated.
+        pub lineage_id: Uuid,
+        /// Current version being amended (also the pending version's predecessor).
+        pub base_version_id: Uuid,
+        /// Member starting the migration.
+        pub proposed_by: Uuid,
+        /// Threshold (`m`) for the next version.
+        pub next_threshold: i32,
+        /// Optional note.
+        pub description: Option<&'a str>,
+        /// Label for the pending version row.
+        pub label: &'a str,
+        /// Bitcoin network string.
+        pub network: &'a str,
+        /// Canonical multipath descriptor for the next version.
+        pub descriptor: &'a str,
+        /// Canonical snapshot JSON for the next version.
+        pub snapshot_json: &'a serde_json::Value,
+        /// `version_index` for the pending version (base + 1).
+        pub version_index: i32,
+        /// Next version's members as `(user_id, signer_id)`.
+        pub next_members: &'a [(Uuid, Uuid)],
+        /// Roster changes as `(user_id, signer_id, action)` for `migration_changes`.
+        pub changes: &'a [(Uuid, Option<Uuid>, &'a str)],
+    }
+
+    /// Atomically open a migration and mint its **pending** successor version:
+    /// inserts the `federation_migrations` record, the pending `federations` row
+    /// (+ its members), the `migration_changes` rows, links the two
+    /// (`target_version_id`), and marks the migration `proposed`. No funds are
+    /// touched. The one-in-flight-per-lineage and one-active-per-lineage indexes
+    /// are the hard guards.
+    ///
+    /// Returns `(migration_id, pending_version_id)`.
+    ///
+    /// # Errors
+    /// Propagates any SQL error (including the one-in-flight-migration unique
+    /// violation); rolls back on any failure mid-way.
+    pub async fn create_pending_migration(
+        pool: &PgPool,
+        spec: &NewPendingMigration<'_>,
+    ) -> sqlx::Result<(Uuid, Uuid)> {
+        let mut tx = pool.begin().await?;
+
+        let migration_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO federation_migrations \
+                (lineage_id, base_version_id, proposed_by, next_threshold, description) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(spec.lineage_id)
+        .bind(spec.base_version_id)
+        .bind(spec.proposed_by)
+        .bind(spec.next_threshold)
+        .bind(spec.description)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let total_signers = i32::try_from(spec.next_members.len()).unwrap_or(i32::MAX);
+        let pending_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO federations \
+                (label, threshold, total_signers, network, descriptor, snapshot_json, \
+                 lineage_id, version_index, status, predecessor_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9) RETURNING id",
+        )
+        .bind(spec.label)
+        .bind(spec.next_threshold)
+        .bind(total_signers)
+        .bind(spec.network)
+        .bind(spec.descriptor)
+        .bind(spec.snapshot_json)
+        .bind(spec.lineage_id)
+        .bind(spec.version_index)
+        .bind(spec.base_version_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        for (user_id, signer_id) in spec.next_members {
+            sqlx::query(
+                "INSERT INTO federation_members (federation_id, user_id, signer_id, role) \
+                 VALUES ($1, $2, $3, 'trustee')",
+            )
+            .bind(pending_id)
+            .bind(user_id)
+            .bind(signer_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for (user_id, signer_id, action) in spec.changes {
+            sqlx::query(
+                "INSERT INTO migration_changes (migration_id, user_id, signer_id, action) \
+                 VALUES ($1, $2, $3, $4)",
+            )
+            .bind(migration_id)
+            .bind(user_id)
+            .bind(signer_id)
+            .bind(action)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            "UPDATE federation_migrations \
+             SET target_version_id = $1, status = 'proposed', updated_at = now() WHERE id = $2",
+        )
+        .bind(pending_id)
+        .bind(migration_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((migration_id, pending_id))
+    }
 } // mod versioning
 
 // ---------------------------------------------------------------------------
@@ -1131,10 +1247,11 @@ mod tests {
     #![allow(clippy::similar_names)]
 
     use super::{
-        NewFederation, NewMigration, current_version_for_lineage, enact_version_transition,
+        create_pending_migration, current_version_for_lineage, enact_version_transition,
         find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
         insert_federation_with_members, insert_migration, lineages_visible_to_user,
-        load_lineage_versions, set_migration_status, set_migration_target_version,
+        list_migration_changes, load_lineage_versions, set_migration_status,
+        set_migration_target_version, NewFederation, NewMigration, NewPendingMigration,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1371,6 +1488,77 @@ mod tests {
             .await?
             .expect("migration row");
         assert_eq!(mig.status, "enacted");
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn create_pending_migration_mints_a_proposed_successor(pool: PgPool) -> sqlx::Result<()> {
+        // v0 = {alice, bob}. Migration: remove bob, add carol → next = {alice, carol}.
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+        let carol = mk_user(&pool, "carol@example.com").await?;
+        let carol_signer = mk_signer(&pool, carol, "fpc").await?;
+
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        mk_member(&pool, lineage, bob, Some(bob_signer)).await?;
+
+        let snap = json!({});
+        let next_members = [(alice, alice_signer), (carol, carol_signer)];
+        let changes: [(Uuid, Option<Uuid>, &str); 3] = [
+            (alice, Some(alice_signer), "keep"),
+            (bob, Some(bob_signer), "remove"),
+            (carol, Some(carol_signer), "add"),
+        ];
+        let spec = NewPendingMigration {
+            lineage_id: lineage,
+            base_version_id: lineage,
+            proposed_by: alice,
+            next_threshold: 2,
+            description: None,
+            label: "Treasury",
+            network: "testnet",
+            descriptor: "wsh(sortedmulti(2,...))",
+            snapshot_json: &snap,
+            version_index: 1,
+            next_members: &next_members,
+            changes: &changes,
+        };
+
+        let (migration, pending) = create_pending_migration(&pool, &spec).await?;
+
+        // Pending successor version: v1, pending, predecessor = v0, two members.
+        let pending_row = find_federation_by_id(&pool, pending).await?.expect("pending row");
+        assert_eq!(pending_row.version_index, 1);
+        assert_eq!(pending_row.status, "pending");
+        assert_eq!(pending_row.predecessor_id, Some(lineage));
+        assert_eq!(pending_row.lineage_id, lineage);
+
+        // The base version is untouched — still the active current one (no funds moved).
+        let base = find_federation_by_id(&pool, lineage).await?.expect("base row");
+        assert_eq!(base.status, "active");
+        assert_eq!(
+            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            lineage
+        );
+
+        // Migration is proposed and linked to the pending version.
+        let mig = find_migration_by_id(&pool, migration).await?.expect("migration");
+        assert_eq!(mig.status, "proposed");
+        assert_eq!(mig.target_version_id, Some(pending));
+        assert_eq!(list_migration_changes(&pool, migration).await?.len(), 3);
+
+        // The lineage now has two versions.
+        assert_eq!(load_lineage_versions(&pool, lineage).await?.len(), 2);
+
+        // One in-flight migration per lineage: a second open is rejected.
+        let err = create_pending_migration(&pool, &spec).await.unwrap_err();
+        assert!(
+            err.as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
+            "second in-flight migration must conflict: {err:?}"
+        );
         Ok(())
     }
 }

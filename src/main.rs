@@ -13,10 +13,12 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod federation_build;
 mod handlers;
 mod lineage;
 mod migration;
 mod models;
+mod roster;
 mod wallet;
 
 use std::net::SocketAddr;
@@ -147,6 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/federations/{id}",
             get(handlers::federations::redirect_to_default),
+        )
+        .route(
+            "/federations/{id}/migrate",
+            get(handlers::migrations::migrate_get),
+        )
+        .route(
+            "/federations/{id}/migrations",
+            post(handlers::migrations::migrate_post),
         )
         .route(
             "/federations/{id}/receive",

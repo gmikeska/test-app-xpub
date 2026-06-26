@@ -24,8 +24,7 @@ use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use asterism_core::descriptor::{KeyMode, to_multipath_string};
-use asterism_core::{DescriptorBuilder, Federation, FederationSnapshot, NetworkType};
+use asterism_core::NetworkType;
 use asterism_xpub::{DeviceType, ExternalSigner};
 
 use crate::AppState;
@@ -196,21 +195,11 @@ pub async fn new_federation_post(
         AppError::BadFederationInput(format!("Threshold {} out of range.", body.threshold))
     })?;
 
-    let mut builder = DescriptorBuilder::new(threshold_u32, network_type).key_mode(KeyMode::Ranged);
-    for s in &external_signers {
-        builder.add_signer(s)?;
-    }
-    let descriptor = builder.build()?;
-    let descriptor_string = to_multipath_string(&descriptor);
-
-    let federation = Federation::new(threshold_u32, external_signers, network_type)
-        .map_err(|e| AppError::BadFederationInput(format!("Cannot construct federation: {e}")))?;
-
-    let snapshot_json: serde_json::Value =
-        serde_json::from_str(&FederationSnapshot::from_federation(&federation).to_canonical_json())
-            .map_err(|e| {
-                AppError::BadFederationInput(format!("Failed to serialise snapshot: {e}"))
-            })?;
+    let built =
+        crate::federation_build::build_federation(external_signers, threshold_u32, network_type)
+            .map_err(AppError::BadFederationInput)?;
+    let descriptor_string = built.descriptor_string;
+    let snapshot_json = built.snapshot_json;
 
     let network_str = state.config.network.to_string();
     let spec = NewFederation {
@@ -269,7 +258,7 @@ fn dedupe_and_force_include_creator(mut ids: Vec<Uuid>, creator: Uuid) -> Vec<Uu
 /// path. Collects all missing emails into a single
 /// [`AppError::MissingMemberSigner`] so the user sees the full list at
 /// once instead of re-submitting once per missing member.
-async fn resolve_member_signers(
+pub(crate) async fn resolve_member_signers(
     pool: &sqlx::PgPool,
     member_ids: &[Uuid],
     derivation_path: &str,

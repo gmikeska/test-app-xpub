@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+
+{% block title %}Migrate federation — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Migrate “{{ label }}”</h1>
+  <p class="muted">
+    Change the roster of the current federation on <code>{{ network }}</code>. You can remove
+    current members and add new ones in a single migration. This mints a <strong>pending</strong>
+    successor version — no funds move until the migration transaction is signed and broadcast.
+  </p>
+</section>
+
+<section class="card">
+  <form method="post" action="/federations/{{ federation_id }}/migrations" class="stack-form">
+
+    <label>
+      <span>New threshold (m, signatures required)</span>
+      <input type="number" name="threshold" required min="1" step="1" value="{{ threshold }}">
+    </label>
+
+    <fieldset class="member-picker">
+      <legend>Current members</legend>
+      <p class="muted">Uncheck a member to remove them from the next version.</p>
+      <ul class="member-list">
+        {% for m in current_members %}
+        <li>
+          <label>
+            <input type="checkbox" name="remove_ids" value="{{ m.user_id }}">
+            Remove {{ m.email }}
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+    </fieldset>
+
+    <fieldset class="member-picker">
+      <legend>Add members</legend>
+      <p class="muted">
+        Users with a P2WSH signer onboarded who aren't current members. Check anyone you'd like
+        to add to the next version.
+      </p>
+      {% if candidates.is_empty() %}
+      <p class="muted">No eligible users to add.</p>
+      {% else %}
+      <ul class="member-list">
+        {% for c in candidates %}
+        <li>
+          <label>
+            <input type="checkbox" name="add_ids" value="{{ c.user_id }}">
+            Add {{ c.email }}
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </fieldset>
+
+    <div class="actions">
+      <button type="submit" class="primary">Create migration</button>
+      <a class="link" href="/federations/{{ federation_id }}">Cancel</a>
+    </div>
+  </form>
+</section>
+{% endblock %}

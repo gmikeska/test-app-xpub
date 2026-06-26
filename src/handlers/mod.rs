@@ -4,6 +4,7 @@ pub mod addresses;
 pub mod auth;
 pub mod federations;
 pub mod home;
+pub mod migrations;
 pub mod new_federation;
 pub mod onboard;
 pub mod proposals;
