@@ -246,8 +246,7 @@ pub async fn detail(
     // View access: a member of this version, OR a current signer of the lineage
     // (who may view a historic version's proposal read-only — mirrors the
     // version-visibility rule for addresses and the Send-tab proposals list).
-    let viewer_is_member =
-        db::user_is_federation_member(&state.db, federation_id, user.id).await?;
+    let viewer_is_member = db::user_is_federation_member(&state.db, federation_id, user.id).await?;
     let status =
         crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
             .await?;
@@ -681,7 +680,11 @@ async fn load_cosigner_statuses(
 
     let viewer_already_signed = signed_by_user.contains_key(&viewer_id);
     let viewer_already_rejected = rejected_by_user.contains_key(&viewer_id);
-    Ok((cosigner_statuses, viewer_already_signed, viewer_already_rejected))
+    Ok((
+        cosigner_statuses,
+        viewer_already_signed,
+        viewer_already_rejected,
+    ))
 }
 
 async fn load_proposal_for_federation(
