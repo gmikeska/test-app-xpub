@@ -275,27 +275,26 @@ pub async fn insert_federation_with_members(
 ) -> sqlx::Result<Uuid> {
     let mut tx = pool.begin().await?;
 
-    let federation_id: Uuid = sqlx::query_scalar(
+    // A brand-new federation is v0 of a fresh lineage. `lineage_id` is NOT NULL
+    // with no default and must equal the row's own id, so we generate the id
+    // client-side and set both in the INSERT (a post-insert UPDATE would trip
+    // the NOT NULL constraint at insert time). version_index = 0 and
+    // status = 'active' come from column defaults.
+    let federation_id = Uuid::new_v4();
+    sqlx::query(
         "INSERT INTO federations \
-            (label, threshold, total_signers, network, descriptor, snapshot_json) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         RETURNING id",
+            (id, lineage_id, label, threshold, total_signers, network, descriptor, snapshot_json) \
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7)",
     )
+    .bind(federation_id)
     .bind(spec.label)
     .bind(spec.threshold)
     .bind(spec.total_signers)
     .bind(spec.network)
     .bind(spec.descriptor)
     .bind(spec.snapshot_json)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-
-    // A brand-new federation is v0 of a fresh lineage: lineage_id = its own id.
-    // (version_index = 0 and status = 'active' come from column defaults.)
-    sqlx::query("UPDATE federations SET lineage_id = id WHERE id = $1")
-        .bind(federation_id)
-        .execute(&mut *tx)
-        .await?;
 
     for (user_id, signer_id) in members {
         sqlx::query(
