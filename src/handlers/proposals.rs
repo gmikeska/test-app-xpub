@@ -60,7 +60,7 @@ pub async fn create(
     Path(federation_id): Path<Uuid>,
     axum::Form(form): axum::Form<CreateProposalForm>,
 ) -> Result<Response, AppError> {
-    let _row = db::find_federation_by_id(&state.db, federation_id)
+    let row = db::find_federation_by_id(&state.db, federation_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
@@ -74,6 +74,25 @@ pub async fn create(
 
     let address = fw.parse_address(form.recipient_address.trim())?;
     let amount = parse_btc_amount(form.amount_btc.trim())?;
+
+    // Old signers (members of a previous version but not the current one) may
+    // only move funds forward to the current federation. Enforce server-side —
+    // the readonly form field is only UX.
+    let status =
+        crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
+            .await?;
+    if !status.is_current_signer
+        && let Some(current_id) = status.current_version_id
+    {
+        let current = state.wallets.load_or_init(current_id).await?;
+        if !current.is_address_mine(&address).await {
+            return Err(AppError::BadRequest(
+                "As a signer on a previous federation version, you can only send to the \
+                 current federation."
+                    .to_string(),
+            ));
+        }
+    }
     if form.fee_rate_sat_vb == 0 {
         return Err(AppError::BadRequest(
             "fee_rate_sat_vb must be at least 1".to_string(),

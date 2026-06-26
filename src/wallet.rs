@@ -840,6 +840,15 @@ impl FederationWallet {
         Ok(address)
     }
 
+    /// `true` if `address` belongs to this wallet's descriptor (any keychain).
+    /// Used to confirm a send destination is one of the current federation's own
+    /// addresses (the restriction that old-version signers may only move funds
+    /// forward to the current federation).
+    pub async fn is_address_mine(&self, address: &Address) -> bool {
+        let wallet = self.inner.lock().await;
+        wallet.is_mine(address.script_pubkey())
+    }
+
     /// Build the migration sweep PSBT: **drain** every UTXO of this (current)
     /// version to `destination` (the successor version's address), with the fee
     /// paid from the swept funds (treasury-pays). One input set → one output, no

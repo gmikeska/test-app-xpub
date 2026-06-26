@@ -38,6 +38,8 @@ use crate::wallet::{REVEAL_COUNT, RevealedAddress};
 #[derive(Debug, Clone, Serialize)]
 pub struct FederationView {
     pub id: Uuid,
+    /// Lineage this version belongs to (for current-version lookups).
+    pub lineage_id: Uuid,
     pub label: String,
     pub threshold: i32,
     pub total_signers: i32,
@@ -164,6 +166,10 @@ struct SendTemplate {
     cosigners: Vec<CosignerView>,
     balance: BalanceView,
     proposals: Vec<ProposalView>,
+    /// `Some(addr)` when the viewer is an **old** signer (a member of a previous
+    /// version but not the current one): the recipient is locked to the current
+    /// federation's address. `None` for current signers (free recipient).
+    locked_recipient: Option<String>,
     active_tab: &'static str,
 }
 
@@ -239,12 +245,30 @@ pub async fn send(
     let proposal_rows = db::list_proposals_for_federation(&state.db, federation_id).await?;
     let proposals: Vec<ProposalView> = proposal_rows.into_iter().map(ProposalView::from).collect();
 
+    // Old signers (members of a previous version, not the current one) may only
+    // send to the current federation: pre-fill + lock the recipient. Current
+    // signers send anywhere.
+    let status = current_signer_status(&state, federation.lineage_id, user.id).await?;
+    let locked_recipient = match (status.is_current_signer, status.current_version_id) {
+        (false, Some(current_id)) => Some(
+            state
+                .wallets
+                .load_or_init(current_id)
+                .await?
+                .reveal_first_external()
+                .await?
+                .to_string(),
+        ),
+        _ => None,
+    };
+
     Ok(SendTemplate {
         email: user.email,
         federation,
         cosigners,
         balance,
         proposals,
+        locked_recipient,
         active_tab: "send",
     }
     .into_response())
@@ -281,6 +305,7 @@ pub async fn load_header(
 
     let federation = FederationView {
         id: row.id,
+        lineage_id: row.lineage_id,
         label: row.label,
         threshold: row.threshold,
         total_signers: row.total_signers,
@@ -295,6 +320,40 @@ pub async fn load_header(
     };
 
     Ok((federation, cosigners))
+}
+
+/// A viewer's signing relationship to a lineage's **current** version.
+pub(crate) struct CurrentSignerStatus {
+    /// The lineage's current active version, if one exists.
+    pub current_version_id: Option<Uuid>,
+    /// Whether the viewer is a signer on that current version.
+    pub is_current_signer: bool,
+}
+
+/// Determine whether `user_id` is a **current** signer of `lineage_id` (a signer
+/// on its active version). Old-only signers (members of a previous version but
+/// not the current one) are restricted to sending to the current federation;
+/// current signers may send anywhere. With no active version, nothing is
+/// restricted.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub(crate) async fn current_signer_status(
+    state: &AppState,
+    lineage_id: Uuid,
+    user_id: Uuid,
+) -> Result<CurrentSignerStatus, AppError> {
+    let current = db::current_version_for_lineage(&state.db, lineage_id).await?;
+    let is_current_signer = match &current {
+        Some(c) => db::find_signer_for_user_in_version(&state.db, user_id, c.id)
+            .await?
+            .is_some(),
+        None => true,
+    };
+    Ok(CurrentSignerStatus {
+        current_version_id: current.map(|c| c.id),
+        is_current_signer,
+    })
 }
 
 fn build_cosigner_view(email: &str, signer: Option<SignerRow>, is_self: bool) -> CosignerView {

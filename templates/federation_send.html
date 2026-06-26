@@ -7,8 +7,13 @@
   <form method="post" action="/federations/{{ federation.id }}/proposals" class="stack-form">
     <label>
       <span>Recipient address</span>
-      <input type="text" name="recipient_address" required autocomplete="off" spellcheck="false"
-             placeholder="bcrt1q…">
+      {% if let Some(addr) = locked_recipient %}
+        <input type="text" name="recipient_address" value="{{ addr }}" readonly>
+        <small class="muted">As a signer on a previous federation version, you can only move funds to the current federation, so the recipient is fixed.</small>
+      {% else %}
+        <input type="text" name="recipient_address" required autocomplete="off" spellcheck="false"
+               placeholder="bcrt1q…">
+      {% endif %}
     </label>
     <label>
       <span>Amount (BTC)</span>
