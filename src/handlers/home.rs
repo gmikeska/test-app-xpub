@@ -27,8 +27,13 @@ use crate::models::SignerRow;
 struct HomeTemplate {
     /// Logged-in user's email.
     email: String,
-    /// Federations the user belongs to.
+    /// Federation versions the user belongs to that are live (active) or
+    /// historic (superseded) — i.e. not pending.
     federations: Vec<FederationView>,
+    /// Pending versions the user has been **added** to by an in-flight migration
+    /// (requirement 2's "invitations"): the user is already a member of the
+    /// pending version, awaiting the migration transaction's signatures.
+    invitations: Vec<FederationView>,
     /// Onboarded signers (always non-empty when we render this template).
     signers: Vec<SignerView>,
 }
@@ -36,11 +41,17 @@ struct HomeTemplate {
 /// View-model for one row in the federations list.
 #[derive(Debug, Serialize)]
 struct FederationView {
-    /// Federation id — used to build the `/federations/:id` link.
+    /// Federation (version) id — used to build the `/federations/:id` link.
     id: Uuid,
+    /// Lineage id — links to the version-history / relay view.
+    lineage_id: Uuid,
     label: String,
     threshold: i32,
     total_signers: i32,
+    /// Position in the lineage (`0` = original).
+    version_index: i32,
+    /// Lifecycle status: `active` | `superseded` | `pending` | `abandoned`.
+    status: String,
     created_at: String,
 }
 
@@ -126,23 +137,35 @@ pub async fn home(
         return Ok(Redirect::to("/onboard").into_response());
     }
 
-    let federations = db::list_federations_for_user(&state.db, user.id)
-        .await?
-        .into_iter()
-        .map(|f| FederationView {
+    // The user's memberships span every version they belong to (any status).
+    // Split pending versions out as "invitations" (req 2): they were added by an
+    // in-flight migration that hasn't been signed/broadcast yet.
+    let mut federations = Vec::new();
+    let mut invitations = Vec::new();
+    for f in db::list_federations_for_user(&state.db, user.id).await? {
+        let view = FederationView {
             id: f.id,
+            lineage_id: f.lineage_id,
             label: f.label,
             threshold: f.threshold,
             total_signers: f.total_signers,
+            version_index: f.version_index,
+            status: f.status.clone(),
             created_at: f.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-        })
-        .collect();
+        };
+        if f.status == "pending" {
+            invitations.push(view);
+        } else {
+            federations.push(view);
+        }
+    }
 
     let signers = signer_rows.into_iter().map(SignerView::from).collect();
 
     Ok(HomeTemplate {
         email: user.email,
         federations,
+        invitations,
         signers,
     }
     .into_response())

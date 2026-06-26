@@ -1377,7 +1377,8 @@ mod tests {
         find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
         inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
         insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
-        list_migration_changes, load_lineage_versions, migration_enactment_for_proposal,
+        list_federations_for_user, list_migration_changes, load_lineage_versions,
+        migration_enactment_for_proposal,
         set_migration_status, set_migration_target_version,
     };
     use serde_json::json;
@@ -1808,6 +1809,65 @@ mod tests {
                 .await?
                 .is_none(),
             "a relay must never enact a version transition"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn invited_user_becomes_current_signer_after_enactment(pool: PgPool) -> sqlx::Result<()> {
+        // v0 = {alice}. A migration adds a brand-new onboarded user, bob.
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+
+        let snap = json!({});
+        let next_members = [(alice, alice_signer), (bob, bob_signer)];
+        let changes: [(Uuid, Option<Uuid>, &str); 2] = [
+            (alice, Some(alice_signer), "keep"),
+            (bob, Some(bob_signer), "add"),
+        ];
+        let spec = NewPendingMigration {
+            lineage_id: lineage,
+            base_version_id: lineage,
+            proposed_by: alice,
+            next_threshold: 2,
+            description: None,
+            label: "Treasury",
+            network: "testnet",
+            descriptor: "wsh(sortedmulti(2,...))",
+            snapshot_json: &snap,
+            version_index: 1,
+            next_members: &next_members,
+            changes: &changes,
+        };
+        let (migration, pending) = create_pending_migration(&pool, &spec).await?;
+
+        // Invited: bob is a member of the pending version → surfaced on /home.
+        let bob_feds = list_federations_for_user(&pool, bob).await?;
+        assert!(
+            bob_feds
+                .iter()
+                .any(|f| f.id == pending && f.status == "pending"),
+            "the invited user sees the pending version"
+        );
+        // Pre-enactment bob cannot sign the current (v0) version — not a member of it.
+        assert!(find_signer_for_user_in_version(&pool, bob, lineage)
+            .await?
+            .is_none());
+
+        // Enact: the pending version becomes current; bob is now a current signer.
+        enact_version_transition(&pool, pending, lineage, migration).await?;
+        assert_eq!(
+            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            pending
+        );
+        assert!(
+            find_signer_for_user_in_version(&pool, bob, pending)
+                .await?
+                .is_some(),
+            "after enactment the invited user can sign the current version"
         );
         Ok(())
     }

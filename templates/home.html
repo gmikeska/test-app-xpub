@@ -49,28 +49,62 @@
   {% endif %}
 </section>
 
+{% if !invitations.is_empty() %}
+<section class="card">
+  <h2>Invitations</h2>
+  <p class="muted">You've been added to a federation by an in-flight migration. It becomes live once the migration transaction is signed and broadcast by the current federation's signers.</p>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Federation</th>
+        <th>Version</th>
+        <th>Policy</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in invitations %}
+        <tr>
+          <td>{{ f.label }} <span class="badge badge-warn">pending</span></td>
+          <td>v{{ f.version_index }}</td>
+          <td>{{ f.threshold }}-of-{{ f.total_signers }}</td>
+          <td><a href="/federations/{{ f.id }}/lineage" class="link">View migration</a></td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <section class="card">
   <div class="section-header">
     <h2>Your federations</h2>
     <a href="/federations/new" class="btn btn-primary">Create federation</a>
   </div>
   {% if federations.is_empty() %}
-    <p class="muted">You are not a member of any federation yet. Create one above, or wait to be added as a cosigner.</p>
+    <p class="muted">You are not a member of any active federation yet. Create one above, or wait to be added as a cosigner.</p>
   {% else %}
     <table class="data">
       <thead>
         <tr>
           <th>Federation</th>
+          <th>Version</th>
           <th>Policy</th>
           <th>Created</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
         {% for f in federations %}
           <tr>
-            <td><a href="/federations/{{ f.id }}">{{ f.label }}</a></td>
+            <td>
+              <a href="/federations/{{ f.id }}">{{ f.label }}</a>
+              {% if f.status != "active" %}<span class="badge">{{ f.status }}</span>{% endif %}
+            </td>
+            <td>v{{ f.version_index }}</td>
             <td>{{ f.threshold }}-of-{{ f.total_signers }}</td>
             <td>{{ f.created_at }}</td>
+            <td><a href="/federations/{{ f.id }}/lineage" class="link">History</a></td>
           </tr>
         {% endfor %}
       </tbody>
