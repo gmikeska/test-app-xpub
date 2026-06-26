@@ -72,6 +72,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 axum-extra = { version = "0.12.6", features = ["form"] }
 
+[features]
+# DB-layer tests (`#[sqlx::test]`) that need a reachable Postgres. Off by
+# default so the regular suite stays DB-free; run with
+#   DATABASE_URL=postgres://… cargo test --features db-tests
+db-tests = []
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 # Web-handler signatures naturally collect many extractors and many fields.

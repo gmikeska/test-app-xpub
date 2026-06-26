@@ -7,7 +7,10 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{FederationRow, ProposalRow, RejectionRow, SignatureRow, SignerRow, UserRow};
+use crate::models::{
+    FederationMigrationRow, FederationRow, MigrationChangeRow, ProposalRow, RejectionRow,
+    SignatureRow, SignerRow, UserRow,
+};
 
 /// Run all `migrations/*.sql` against `pool`.
 ///
@@ -287,6 +290,13 @@ pub async fn insert_federation_with_members(
     .fetch_one(&mut *tx)
     .await?;
 
+    // A brand-new federation is v0 of a fresh lineage: lineage_id = its own id.
+    // (version_index = 0 and status = 'active' come from column defaults.)
+    sqlx::query("UPDATE federations SET lineage_id = id WHERE id = $1")
+        .bind(federation_id)
+        .execute(&mut *tx)
+        .await?;
+
     for (user_id, signer_id) in members {
         sqlx::query(
             "INSERT INTO federation_members \
@@ -315,7 +325,8 @@ pub async fn list_federations_for_user(
     sqlx::query_as::<_, FederationRow>(
         "SELECT f.id, f.label, f.threshold, f.total_signers, f.network, \
                 f.descriptor, f.snapshot_json, f.bdk_changeset, \
-                f.chain_tip_height, f.created_at \
+                f.chain_tip_height, f.lineage_id, f.version_index, \
+                f.predecessor_id, f.status, f.created_at \
          FROM federations f \
          JOIN federation_members m ON m.federation_id = f.id \
          WHERE m.user_id = $1 \
@@ -333,7 +344,8 @@ pub async fn list_federations_for_user(
 pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT id, label, threshold, total_signers, network, descriptor, \
-                snapshot_json, bdk_changeset, chain_tip_height, created_at \
+                snapshot_json, bdk_changeset, chain_tip_height, lineage_id, \
+                version_index, predecessor_id, status, created_at \
          FROM federations WHERE id = $1",
     )
     .bind(id)
@@ -795,4 +807,558 @@ pub async fn list_rejections_for_proposal(
     .bind(proposal_id)
     .fetch_all(pool)
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Federation versions / lineage + migrations (Phase 1)
+//
+// A cohesive data layer consumed by Phases 2–4 (FederatedWallet adoption,
+// migration flow, enactment). Grouped in a submodule marked `allow(dead_code)`
+// until those phases wire it; re-exported so call sites stay `db::*`.
+// ---------------------------------------------------------------------------
+#[allow(unused_imports)] // handlers/wallet consume these from Phase 2 onward
+pub use versioning::*;
+
+mod versioning {
+    #![allow(dead_code)]
+
+    use super::{FederationMigrationRow, FederationRow, MigrationChangeRow, SignerRow};
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    const FEDERATION_COLS: &str = "id, label, threshold, total_signers, network, descriptor, \
+     snapshot_json, bdk_changeset, chain_tip_height, lineage_id, version_index, \
+     predecessor_id, status, created_at";
+
+    /// All versions of a lineage, oldest first (`version_index` ascending).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn load_lineage_versions(
+        pool: &PgPool,
+        lineage_id: Uuid,
+    ) -> sqlx::Result<Vec<FederationRow>> {
+        sqlx::query_as::<_, FederationRow>(&format!(
+            "SELECT {FEDERATION_COLS} FROM federations \
+         WHERE lineage_id = $1 ORDER BY version_index ASC"
+        ))
+        .bind(lineage_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// The current (newest `active`) version of a lineage, if any.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn current_version_for_lineage(
+        pool: &PgPool,
+        lineage_id: Uuid,
+    ) -> sqlx::Result<Option<FederationRow>> {
+        sqlx::query_as::<_, FederationRow>(&format!(
+            "SELECT {FEDERATION_COLS} FROM federations \
+         WHERE lineage_id = $1 AND status = 'active' LIMIT 1"
+        ))
+        .bind(lineage_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Lineage ids the user can *see*: those where they are a member of **any**
+    /// version (visibility is lineage-wide; signing eligibility is per-version —
+    /// see [`find_signer_for_user_in_version`]).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn lineages_visible_to_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Vec<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT f.lineage_id \
+         FROM federations f \
+         JOIN federation_members m ON m.federation_id = f.id \
+         WHERE m.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// The signer `user_id` contributes to **this specific** federation version, if
+    /// any. Drives per-version signing eligibility: `Some` ⇒ the user is asked to
+    /// sign proposals/migrations/relays spending this version; `None` ⇒ they are a
+    /// non-member (or a member without a recorded signer) and are never asked.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn find_signer_for_user_in_version(
+        pool: &PgPool,
+        user_id: Uuid,
+        federation_id: Uuid,
+    ) -> sqlx::Result<Option<SignerRow>> {
+        sqlx::query_as::<_, SignerRow>(
+            "SELECT s.id, s.user_id, s.label, s.descriptor_key, s.xpub, s.fingerprint, \
+                s.derivation_path, s.device_type, s.network, s.created_at \
+         FROM signers s \
+         JOIN federation_members m ON m.signer_id = s.id \
+         WHERE m.federation_id = $1 AND m.user_id = $2 \
+         LIMIT 1",
+        )
+        .bind(federation_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Set a federation version's lifecycle status (`pending` | `active` |
+    /// `superseded` | `abandoned`).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn set_federation_status(
+        pool: &PgPool,
+        federation_id: Uuid,
+        status: &str,
+    ) -> sqlx::Result<()> {
+        sqlx::query("UPDATE federations SET status = $1 WHERE id = $2")
+            .bind(status)
+            .bind(federation_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Federation migrations (the version-change record)
+    // ---------------------------------------------------------------------------
+
+    /// Inputs to [`insert_migration`].
+    pub struct NewMigration {
+        /// Lineage being migrated.
+        pub lineage_id: Uuid,
+        /// Current version this migration amends.
+        pub base_version_id: Uuid,
+        /// Member starting the migration.
+        pub proposed_by: Uuid,
+        /// Threshold (`m`) for the next version.
+        pub next_threshold: i32,
+        /// Optional note.
+        pub description: Option<String>,
+    }
+
+    /// Open a new migration in `draft`. The partial unique index enforces at most
+    /// one in-flight (`draft`/`proposed`) migration per lineage — a second
+    /// concurrent open fails with a unique-violation.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error (including the one-in-flight violation).
+    pub async fn insert_migration(pool: &PgPool, spec: &NewMigration) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO federation_migrations \
+            (lineage_id, base_version_id, proposed_by, next_threshold, description) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(spec.lineage_id)
+        .bind(spec.base_version_id)
+        .bind(spec.proposed_by)
+        .bind(spec.next_threshold)
+        .bind(spec.description.as_deref())
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Look up a migration by id.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn find_migration_by_id(
+        pool: &PgPool,
+        id: Uuid,
+    ) -> sqlx::Result<Option<FederationMigrationRow>> {
+        sqlx::query_as::<_, FederationMigrationRow>(
+            "SELECT id, lineage_id, base_version_id, target_version_id, proposed_by, \
+                next_threshold, status, description, created_at, updated_at \
+         FROM federation_migrations WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// The in-flight (`draft`/`proposed`) migration for a lineage, if one is open.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn inflight_migration_for_lineage(
+        pool: &PgPool,
+        lineage_id: Uuid,
+    ) -> sqlx::Result<Option<FederationMigrationRow>> {
+        sqlx::query_as::<_, FederationMigrationRow>(
+            "SELECT id, lineage_id, base_version_id, target_version_id, proposed_by, \
+                next_threshold, status, description, created_at, updated_at \
+         FROM federation_migrations \
+         WHERE lineage_id = $1 AND status IN ('draft', 'proposed') LIMIT 1",
+        )
+        .bind(lineage_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Move a migration to a new lifecycle status (`draft` | `proposed` |
+    /// `enacted` | `cancelled`).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn set_migration_status(
+        pool: &PgPool,
+        migration_id: Uuid,
+        status: &str,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE federation_migrations SET status = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(status)
+        .bind(migration_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record the pending successor version a migration mints (Phase 3).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn set_migration_target_version(
+        pool: &PgPool,
+        migration_id: Uuid,
+        target_version_id: Uuid,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+        "UPDATE federation_migrations SET target_version_id = $1, updated_at = now() WHERE id = $2",
+    )
+    .bind(target_version_id)
+    .bind(migration_id)
+    .execute(pool)
+    .await?;
+        Ok(())
+    }
+
+    /// Add one roster-change row (`add` / `remove` / `keep`) to a migration.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn insert_migration_change(
+        pool: &PgPool,
+        migration_id: Uuid,
+        user_id: Uuid,
+        signer_id: Option<Uuid>,
+        action: &str,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO migration_changes (migration_id, user_id, signer_id, action) \
+         VALUES ($1, $2, $3, $4)",
+        )
+        .bind(migration_id)
+        .bind(user_id)
+        .bind(signer_id)
+        .bind(action)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// List a migration's roster changes.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn list_migration_changes(
+        pool: &PgPool,
+        migration_id: Uuid,
+    ) -> sqlx::Result<Vec<MigrationChangeRow>> {
+        sqlx::query_as::<_, MigrationChangeRow>(
+            "SELECT migration_id, user_id, signer_id, action, role \
+         FROM migration_changes WHERE migration_id = $1 ORDER BY action, user_id",
+        )
+        .bind(migration_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Atomically apply a version flip when a migration's transaction broadcasts:
+    /// supersede the predecessor, activate the new version, and mark the migration
+    /// `enacted`. The predecessor is superseded **before** the new version is
+    /// activated so the "one active per lineage" unique index is never transiently
+    /// violated.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error; rolls back on any failure mid-way.
+    pub async fn enact_version_transition(
+        pool: &PgPool,
+        new_version_id: Uuid,
+        predecessor_id: Uuid,
+        migration_id: Uuid,
+    ) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("UPDATE federations SET status = 'superseded' WHERE id = $1")
+            .bind(predecessor_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE federations SET status = 'active' WHERE id = $1")
+            .bind(new_version_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE federation_migrations SET status = 'enacted', updated_at = now() WHERE id = $1",
+        )
+        .bind(migration_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+} // mod versioning
+
+// ---------------------------------------------------------------------------
+// Phase 1 DB-layer tests (need a reachable Postgres; gated behind `db-tests`).
+//
+//   DATABASE_URL=postgres://asterism:asterism@HOST:5432/asterism_xpub \
+//     cargo test --features db-tests
+//
+// `#[sqlx::test]` provisions an isolated database per test and applies every
+// `migrations/*.sql` first, so these also exercise that the new migrations
+// apply cleanly on a fresh DB.
+// ---------------------------------------------------------------------------
+#[cfg(all(test, feature = "db-tests"))]
+mod tests {
+    #![allow(clippy::similar_names)]
+
+    use super::{
+        current_version_for_lineage, enact_version_transition, find_federation_by_id,
+        find_migration_by_id, find_signer_for_user_in_version, insert_federation_with_members,
+        insert_migration, lineages_visible_to_user, load_lineage_versions, set_migration_status,
+        set_migration_target_version, NewFederation, NewMigration,
+    };
+    use serde_json::json;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn mk_user(pool: &PgPool, email: &str) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO users (email, password_hash) VALUES ($1, 'x') RETURNING id",
+        )
+        .bind(email)
+        .fetch_one(pool)
+        .await
+    }
+
+    async fn mk_signer(pool: &PgPool, user_id: Uuid, fingerprint: &str) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO signers \
+                (user_id, descriptor_key, xpub, fingerprint, derivation_path, device_type, network) \
+             VALUES ($1, 'dk', 'xpub', $2, 'testpath', 'Trezor', 'testnet') RETURNING id",
+        )
+        .bind(user_id)
+        .bind(fingerprint)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Create a v0 federation (its own lineage) with a single member, returning
+    /// `(federation_id, lineage_id)` — which are equal for v0.
+    async fn mk_v0(pool: &PgPool, owner: Uuid, signer: Uuid, label: &str) -> sqlx::Result<Uuid> {
+        let snap = json!({});
+        let spec = NewFederation {
+            label,
+            threshold: 1,
+            total_signers: 1,
+            network: "testnet",
+            descriptor: "wsh(sortedmulti(1,...))",
+            snapshot_json: &snap,
+        };
+        insert_federation_with_members(pool, &spec, &[(owner, signer)]).await
+    }
+
+    /// Insert a raw federation version row with explicit lineage/version/status.
+    async fn mk_version(
+        pool: &PgPool,
+        lineage_id: Uuid,
+        version_index: i32,
+        status: &str,
+        predecessor: Option<Uuid>,
+    ) -> sqlx::Result<Uuid> {
+        let snap = json!({});
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO federations \
+                (label, threshold, total_signers, network, descriptor, snapshot_json, \
+                 lineage_id, version_index, status, predecessor_id) \
+             VALUES ('v', 1, 1, 'testnet', 'desc', $1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(snap)
+        .bind(lineage_id)
+        .bind(version_index)
+        .bind(status)
+        .bind(predecessor)
+        .fetch_one(pool)
+        .await
+    }
+
+    async fn mk_member(
+        pool: &PgPool,
+        federation_id: Uuid,
+        user_id: Uuid,
+        signer_id: Option<Uuid>,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO federation_members (federation_id, user_id, signer_id, role) \
+             VALUES ($1, $2, $3, 'trustee')",
+        )
+        .bind(federation_id)
+        .bind(user_id)
+        .bind(signer_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    fn is_unique_violation(err: &sqlx::Error) -> bool {
+        err.as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation)
+    }
+
+    fn new_migration(lineage: Uuid, base: Uuid, by: Uuid) -> NewMigration {
+        NewMigration {
+            lineage_id: lineage,
+            base_version_id: base,
+            proposed_by: by,
+            next_threshold: 1,
+            description: None,
+        }
+    }
+
+    #[sqlx::test]
+    async fn new_federation_is_v0_active_of_its_own_lineage(pool: PgPool) -> sqlx::Result<()> {
+        let user = mk_user(&pool, "a@example.com").await?;
+        let signer = mk_signer(&pool, user, "fp0").await?;
+        let fed = mk_v0(&pool, user, signer, "Treasury").await?;
+
+        let row = find_federation_by_id(&pool, fed)
+            .await?
+            .expect("row exists");
+        assert_eq!(row.lineage_id, fed, "v0 lineage_id equals its own id");
+        assert_eq!(row.version_index, 0);
+        assert_eq!(row.status, "active");
+        assert!(row.predecessor_id.is_none());
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn one_active_version_per_lineage_enforced(pool: PgPool) -> sqlx::Result<()> {
+        let user = mk_user(&pool, "a@example.com").await?;
+        let signer = mk_signer(&pool, user, "fp0").await?;
+        let lineage = mk_v0(&pool, user, signer, "Treasury").await?;
+
+        // A second `active` version in the same lineage is rejected.
+        let err = mk_version(&pool, lineage, 1, "active", Some(lineage))
+            .await
+            .unwrap_err();
+        assert!(
+            is_unique_violation(&err),
+            "two active versions must conflict: {err:?}"
+        );
+
+        // A `pending` successor is fine, and the lineage now has two versions.
+        let _pending = mk_version(&pool, lineage, 1, "pending", Some(lineage)).await?;
+        let versions = load_lineage_versions(&pool, lineage).await?;
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[0].version_index, 0);
+        assert_eq!(versions[1].version_index, 1);
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn visibility_is_lineage_wide_but_signing_is_per_version(
+        pool: PgPool,
+    ) -> sqlx::Result<()> {
+        // v0 = {alice}; v1 (pending) = {bob}. Alice removed, bob added.
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        let v1 = mk_version(&pool, lineage, 1, "pending", Some(lineage)).await?;
+        mk_member(&pool, v1, bob, Some(bob_signer)).await?;
+
+        // Req 7: a member of any version sees the whole lineage.
+        assert!(lineages_visible_to_user(&pool, alice)
+            .await?
+            .contains(&lineage));
+        assert!(lineages_visible_to_user(&pool, bob)
+            .await?
+            .contains(&lineage));
+
+        // Req 6: alice (removed) can still sign v0, never v1.
+        assert!(find_signer_for_user_in_version(&pool, alice, lineage)
+            .await?
+            .is_some());
+        assert!(find_signer_for_user_in_version(&pool, alice, v1)
+            .await?
+            .is_none());
+        // Req 7: bob (added) can sign v1, is never asked to sign historic v0.
+        assert!(find_signer_for_user_in_version(&pool, bob, v1)
+            .await?
+            .is_some());
+        assert!(find_signer_for_user_in_version(&pool, bob, lineage)
+            .await?
+            .is_none());
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn one_inflight_migration_per_lineage(pool: PgPool) -> sqlx::Result<()> {
+        let user = mk_user(&pool, "a@example.com").await?;
+        let signer = mk_signer(&pool, user, "fp0").await?;
+        let lineage = mk_v0(&pool, user, signer, "Treasury").await?;
+
+        let first = insert_migration(&pool, &new_migration(lineage, lineage, user)).await?;
+        // A second in-flight migration on the same lineage is rejected.
+        let err = insert_migration(&pool, &new_migration(lineage, lineage, user))
+            .await
+            .unwrap_err();
+        assert!(
+            is_unique_violation(&err),
+            "two in-flight migrations must conflict: {err:?}"
+        );
+
+        // Once the first is no longer in flight, a new one is allowed.
+        set_migration_status(&pool, first, "enacted").await?;
+        let _second = insert_migration(&pool, &new_migration(lineage, lineage, user)).await?;
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn enact_transition_flips_versions_and_migration(pool: PgPool) -> sqlx::Result<()> {
+        let user = mk_user(&pool, "a@example.com").await?;
+        let signer = mk_signer(&pool, user, "fp0").await?;
+        let lineage = mk_v0(&pool, user, signer, "Treasury").await?;
+        let v1 = mk_version(&pool, lineage, 1, "pending", Some(lineage)).await?;
+
+        let migration = insert_migration(&pool, &new_migration(lineage, lineage, user)).await?;
+        set_migration_target_version(&pool, migration, v1).await?;
+        set_migration_status(&pool, migration, "proposed").await?;
+
+        enact_version_transition(&pool, v1, lineage, migration).await?;
+
+        let current = current_version_for_lineage(&pool, lineage)
+            .await?
+            .expect("a current version");
+        assert_eq!(current.id, v1, "the new version is now current");
+        let old = find_federation_by_id(&pool, lineage)
+            .await?
+            .expect("v0 row");
+        assert_eq!(old.status, "superseded");
+        let mig = find_migration_by_id(&pool, migration)
+            .await?
+            .expect("migration row");
+        assert_eq!(mig.status, "enacted");
+        Ok(())
+    }
 }

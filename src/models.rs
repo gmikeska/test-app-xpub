@@ -66,8 +66,63 @@ pub struct FederationRow {
     /// Cached chain tip height (from the BDK wallet's local chain) for
     /// display on the federation page. `None` before the first sync.
     pub chain_tip_height: Option<i32>,
+    /// Lineage this version belongs to. All versions of one wallet share it;
+    /// for a brand-new federation it equals the row's own `id` (v0).
+    pub lineage_id: Uuid,
+    /// Position within the lineage (`0` = oldest). The newest `active` version
+    /// is "current".
+    pub version_index: i32,
+    /// The version this one succeeds (the migration's base). `None` for v0.
+    pub predecessor_id: Option<Uuid>,
+    /// Lifecycle: `pending` | `active` | `superseded` | `abandoned`.
+    pub status: String,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
+}
+
+/// `federation_migrations` row — the version-change record (roster change that
+/// mints version N+1). The signed sweep lives in `transaction_proposals`
+/// (`kind = 'migration'`); this is the governance/record side.
+#[allow(dead_code)] // consumed by the migration flow in Phases 3–4
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct FederationMigrationRow {
+    /// Migration id.
+    pub id: Uuid,
+    /// Lineage being migrated.
+    pub lineage_id: Uuid,
+    /// Current version this migration amends.
+    pub base_version_id: Uuid,
+    /// Pending successor version (set once it is minted in Phase 3).
+    pub target_version_id: Option<Uuid>,
+    /// Member who started the migration.
+    pub proposed_by: Uuid,
+    /// Threshold (`m`) chosen for the next version.
+    pub next_threshold: i32,
+    /// Lifecycle: `draft` | `proposed` | `enacted` | `cancelled`.
+    pub status: String,
+    /// Optional free-form note.
+    pub description: Option<String>,
+    /// Row creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Most-recent-mutation timestamp.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `migration_changes` row — one prospective member's roster action within a
+/// migration (`add` / `remove` / `keep`).
+#[allow(dead_code)] // consumed by the migration flow in Phases 3–4
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct MigrationChangeRow {
+    /// Owning migration.
+    pub migration_id: Uuid,
+    /// The member this change concerns.
+    pub user_id: Uuid,
+    /// Signer the member contributes to the next version (for `add`/`keep`).
+    pub signer_id: Option<Uuid>,
+    /// `add` | `remove` | `keep`.
+    pub action: String,
+    /// Member role in the next version.
+    pub role: String,
 }
 
 /// `transaction_proposals` row.
