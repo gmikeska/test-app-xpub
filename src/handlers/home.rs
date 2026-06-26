@@ -27,13 +27,10 @@ use crate::models::SignerRow;
 struct HomeTemplate {
     /// Logged-in user's email.
     email: String,
-    /// Federation versions the user belongs to that are live (active) or
-    /// historic (superseded) — i.e. not pending.
+    /// One row per `FederatedWallet` (lineage) the user has access to — the
+    /// most recent version they're a member of. A signer kept across migrations
+    /// shows once; an invitee's row is `pending` (badged) until enactment.
     federations: Vec<FederationView>,
-    /// Pending versions the user has been **added** to by an in-flight migration
-    /// (requirement 2's "invitations"): the user is already a member of the
-    /// pending version, awaiting the migration transaction's signatures.
-    invitations: Vec<FederationView>,
     /// Onboarded signers (always non-empty when we render this template).
     signers: Vec<SignerView>,
 }
@@ -137,35 +134,30 @@ pub async fn home(
         return Ok(Redirect::to("/onboard").into_response());
     }
 
-    // The user's memberships span every version they belong to (any status).
-    // Split pending versions out as "invitations" (req 2): they were added by an
-    // in-flight migration that hasn't been signed/broadcast yet.
-    let mut federations = Vec::new();
-    let mut invitations = Vec::new();
-    for f in db::list_federations_for_user(&state.db, user.id).await? {
-        let view = FederationView {
+    // One entry per FederatedWallet (lineage): the most recent version the user
+    // is a member of. Collapses the per-version duplication; an invitee's
+    // representative version is `pending` (badged in the template).
+    let mut rows = db::most_recent_entitled_versions_for_user(&state.db, user.id).await?;
+    rows.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+    let federations: Vec<FederationView> = rows
+        .into_iter()
+        .map(|f| FederationView {
             id: f.id,
             lineage_id: f.lineage_id,
             label: f.label,
             threshold: f.threshold,
             total_signers: f.total_signers,
             version_index: f.version_index,
-            status: f.status.clone(),
+            status: f.status,
             created_at: f.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-        };
-        if f.status == "pending" {
-            invitations.push(view);
-        } else {
-            federations.push(view);
-        }
-    }
+        })
+        .collect();
 
     let signers = signer_rows.into_iter().map(SignerView::from).collect();
 
     Ok(HomeTemplate {
         email: user.email,
         federations,
-        invitations,
         signers,
     }
     .into_response())

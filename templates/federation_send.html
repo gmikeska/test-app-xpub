@@ -15,11 +15,15 @@
                placeholder="bcrt1q…">
       {% endif %}
     </label>
+    {% if locked_recipient.is_none() %}
     <label>
       <span>Amount (BTC)</span>
       <input type="text" name="amount_btc" required autocomplete="off"
              placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
     </label>
+    {% else %}
+    <p class="muted">The <strong>entire balance</strong> of this version will be swept to the current federation; the network fee is deducted from the amount.</p>
+    {% endif %}
     <label>
       <span>Fee rate (sat/vB)</span>
       <input type="number" name="fee_rate_sat_vb" required min="1" value="2" step="1">

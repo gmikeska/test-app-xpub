@@ -44,8 +44,10 @@ use crate::wallet::TrezorSignRequest;
 pub struct CreateProposalForm {
     /// Destination address (validated against the wallet's network).
     pub recipient_address: String,
-    /// Amount as a decimal BTC value (e.g. `"0.0005"`).
-    pub amount_btc: String,
+    /// Amount as a decimal BTC value (e.g. `"0.0005"`). Optional: ignored for
+    /// old-signer sends, which sweep the entire balance.
+    #[serde(default)]
+    pub amount_btc: Option<String>,
     /// Fee rate in sat/vB (regtest default = 2).
     pub fee_rate_sat_vb: u64,
     /// Optional human-readable label.
@@ -73,35 +75,43 @@ pub async fn create(
     fw.sync().await?;
 
     let address = fw.parse_address(form.recipient_address.trim())?;
-    let amount = parse_btc_amount(form.amount_btc.trim())?;
-
-    // Old signers (members of a previous version but not the current one) may
-    // only move funds forward to the current federation. Enforce server-side —
-    // the readonly form field is only UX.
-    let status =
-        crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
-            .await?;
-    if !status.is_current_signer
-        && let Some(current_id) = status.current_version_id
-    {
-        let current = state.wallets.load_or_init(current_id).await?;
-        if !current.is_address_mine(&address).await {
-            return Err(AppError::BadRequest(
-                "As a signer on a previous federation version, you can only send to the \
-                 current federation."
-                    .to_string(),
-            ));
-        }
-    }
     if form.fee_rate_sat_vb == 0 {
         return Err(AppError::BadRequest(
             "fee_rate_sat_vb must be at least 1".to_string(),
         ));
     }
 
-    let built = fw
-        .build_proposal(&address, amount, form.fee_rate_sat_vb)
-        .await?;
+    // Old signers (members of a previous version but not the current one) may
+    // only move funds forward to the current federation, and do so by sweeping
+    // the **entire** balance (the fee comes out of the amount sent). Current
+    // signers send a chosen amount to any address. Enforced server-side — the
+    // form is only UX.
+    let status =
+        crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
+            .await?;
+    let built = if status.is_current_signer {
+        let amount_str = form
+            .amount_btc
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
+        let amount = parse_btc_amount(amount_str)?;
+        fw.build_proposal(&address, amount, form.fee_rate_sat_vb).await?
+    } else {
+        if let Some(current_id) = status.current_version_id {
+            let current = state.wallets.load_or_init(current_id).await?;
+            if !current.is_address_mine(&address).await {
+                return Err(AppError::BadRequest(
+                    "As a signer on a previous federation version, you can only send to the \
+                     current federation."
+                        .to_string(),
+                ));
+            }
+        }
+        // Sweep the whole balance forward; the fee comes out of the swept amount.
+        fw.build_migration_tx(&address, form.fee_rate_sat_vb).await?
+    };
 
     let label_ref = form.label.as_deref().filter(|s| !s.trim().is_empty());
     let proposal = db::insert_proposal(

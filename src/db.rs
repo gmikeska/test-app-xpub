@@ -297,10 +297,13 @@ pub async fn insert_federation_with_members(
     Ok(federation_id)
 }
 
-/// Federations `user_id` is a member of, most recently created first.
+/// Federations `user_id` is a member of, most recently created first. (Home now
+/// uses [`most_recent_entitled_versions_for_user`] for one row per lineage; this
+/// raw per-membership listing is retained for tests / future use.)
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
+#[allow(dead_code)]
 pub async fn list_federations_for_user(
     pool: &PgPool,
     user_id: Uuid,
@@ -865,6 +868,33 @@ mod versioning {
         .await
     }
 
+    /// One **representative** version per lineage the user can see: the most
+    /// recent version (highest `version_index`) the user is a member of. Drives
+    /// the one-row-per-FederatedWallet home listing — a signer kept across
+    /// migrations collapses to a single entry, and an invitee's representative
+    /// is the `pending` version they were added to.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn most_recent_entitled_versions_for_user(
+        pool: &PgPool,
+        user_id: Uuid,
+    ) -> sqlx::Result<Vec<FederationRow>> {
+        sqlx::query_as::<_, FederationRow>(
+            "SELECT DISTINCT ON (f.lineage_id) \
+                    f.id, f.label, f.threshold, f.total_signers, f.network, f.descriptor, \
+                    f.snapshot_json, f.bdk_changeset, f.chain_tip_height, f.lineage_id, \
+                    f.version_index, f.predecessor_id, f.status, f.created_at \
+             FROM federations f \
+             JOIN federation_members m ON m.federation_id = f.id \
+             WHERE m.user_id = $1 \
+             ORDER BY f.lineage_id, f.version_index DESC",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+    }
+
     /// The signer `user_id` contributes to **this specific** federation version, if
     /// any. Drives per-version signing eligibility: `Some` ⇒ the user is asked to
     /// sign proposals/migrations/relays spending this version; `None` ⇒ they are a
@@ -1378,7 +1408,8 @@ mod tests {
         inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
         insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
         list_federations_for_user, list_migration_changes, load_lineage_versions,
-        migration_enactment_for_proposal, set_migration_status, set_migration_target_version,
+        migration_enactment_for_proposal, most_recent_entitled_versions_for_user,
+        set_federation_status, set_migration_status, set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1809,6 +1840,25 @@ mod tests {
                 .is_none(),
             "a relay must never enact a version transition"
         );
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn home_lists_one_entry_per_lineage(pool: PgPool) -> sqlx::Result<()> {
+        // alice is kept across a migration: member of v0 (superseded) AND v1 (active).
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        set_federation_status(&pool, lineage, "superseded").await?;
+        let v1 = mk_version(&pool, lineage, 1, "active", Some(lineage)).await?;
+        mk_member(&pool, v1, alice, Some(alice_signer)).await?;
+
+        // Two memberships, but Home collapses to ONE entry — the newest version.
+        let entries = most_recent_entitled_versions_for_user(&pool, alice).await?;
+        assert_eq!(entries.len(), 1, "one row per FederatedWallet (lineage)");
+        assert_eq!(entries[0].id, v1);
+        assert_eq!(entries[0].version_index, 1);
+        assert_eq!(entries[0].status, "active");
         Ok(())
     }
 
