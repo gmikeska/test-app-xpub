@@ -116,8 +116,8 @@ pub fn plan_migration_sweep(
 mod tests {
     use super::*;
     use asterism_core::migration::SweepOutput;
-    use bdk_wallet::chain::ChainPosition;
     use bdk_wallet::KeychainKind;
+    use bdk_wallet::chain::ChainPosition;
     use bitcoin::hashes::Hash;
     use bitcoin::{Network, OutPoint, TxOut, Txid};
 
@@ -158,19 +158,29 @@ mod tests {
 
     #[test]
     fn treasury_sweep_is_single_tx_with_one_fee_change_output() {
-        let utxos = vec![dummy_utxo(500_000, 0), dummy_utxo(250_000, 1), dummy_utxo(50_000, 2)];
+        let utxos = vec![
+            dummy_utxo(500_000, 0),
+            dummy_utxo(250_000, 1),
+            dummy_utxo(50_000, 2),
+        ];
         let sweep = plan_migration_sweep(utxos, dest_address(), TESTNET, rate()).unwrap();
 
         // Exactly one transaction, finalised onto the new federation.
         assert_eq!(sweep.plan.sweep_transactions.len(), 1);
         let tx = sweep.sweep_transaction();
-        assert!(tx.is_fee_final, "single-account sweep crosses to the new federation");
+        assert!(
+            tx.is_fee_final,
+            "single-account sweep crosses to the new federation"
+        );
         assert_eq!(tx.source_utxos.len(), 3, "all UTXOs are spent");
 
         // The sole output is the treasury's fee-change drain for account 0.
         assert_eq!(tx.outputs.len(), 1);
         match &tx.outputs[0] {
-            SweepOutput::FeeChange { account_idx, amount } => {
+            SweepOutput::FeeChange {
+                account_idx,
+                amount,
+            } => {
                 assert_eq!(*account_idx, TREASURY_ACCOUNT_IDX);
                 assert_eq!(*amount, sweep.net_out);
             }

@@ -1131,10 +1131,10 @@ mod tests {
     #![allow(clippy::similar_names)]
 
     use super::{
-        current_version_for_lineage, enact_version_transition, find_federation_by_id,
-        find_migration_by_id, find_signer_for_user_in_version, insert_federation_with_members,
-        insert_migration, lineages_visible_to_user, load_lineage_versions, set_migration_status,
-        set_migration_target_version, NewFederation, NewMigration,
+        NewFederation, NewMigration, current_version_for_lineage, enact_version_transition,
+        find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
+        insert_federation_with_members, insert_migration, lineages_visible_to_user,
+        load_lineage_versions, set_migration_status, set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1288,27 +1288,39 @@ mod tests {
         mk_member(&pool, v1, bob, Some(bob_signer)).await?;
 
         // Req 7: a member of any version sees the whole lineage.
-        assert!(lineages_visible_to_user(&pool, alice)
-            .await?
-            .contains(&lineage));
-        assert!(lineages_visible_to_user(&pool, bob)
-            .await?
-            .contains(&lineage));
+        assert!(
+            lineages_visible_to_user(&pool, alice)
+                .await?
+                .contains(&lineage)
+        );
+        assert!(
+            lineages_visible_to_user(&pool, bob)
+                .await?
+                .contains(&lineage)
+        );
 
         // Req 6: alice (removed) can still sign v0, never v1.
-        assert!(find_signer_for_user_in_version(&pool, alice, lineage)
-            .await?
-            .is_some());
-        assert!(find_signer_for_user_in_version(&pool, alice, v1)
-            .await?
-            .is_none());
+        assert!(
+            find_signer_for_user_in_version(&pool, alice, lineage)
+                .await?
+                .is_some()
+        );
+        assert!(
+            find_signer_for_user_in_version(&pool, alice, v1)
+                .await?
+                .is_none()
+        );
         // Req 7: bob (added) can sign v1, is never asked to sign historic v0.
-        assert!(find_signer_for_user_in_version(&pool, bob, v1)
-            .await?
-            .is_some());
-        assert!(find_signer_for_user_in_version(&pool, bob, lineage)
-            .await?
-            .is_none());
+        assert!(
+            find_signer_for_user_in_version(&pool, bob, v1)
+                .await?
+                .is_some()
+        );
+        assert!(
+            find_signer_for_user_in_version(&pool, bob, lineage)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 
