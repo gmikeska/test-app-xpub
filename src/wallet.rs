@@ -869,11 +869,7 @@ impl FederationWallet {
     /// Merge a staged changeset delta into the aggregate and persist it (no-op
     /// when `delta` is `None`). Shared by the address-reveal and sweep-build
     /// paths.
-    async fn persist_delta(
-        &self,
-        delta: Option<ChangeSet>,
-        tip: u32,
-    ) -> Result<(), WalletError> {
+    async fn persist_delta(&self, delta: Option<ChangeSet>, tip: u32) -> Result<(), WalletError> {
         if let Some(delta) = delta {
             let mut agg = self.aggregate.lock().await;
             agg.merge(delta);

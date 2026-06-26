@@ -187,8 +187,12 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    let built = build_federation(signers, threshold, NetworkType::Bitcoin(state.config.network))
-        .map_err(AppError::BadFederationInput)?;
+    let built = build_federation(
+        signers,
+        threshold,
+        NetworkType::Bitcoin(state.config.network),
+    )
+    .map_err(AppError::BadFederationInput)?;
 
     // Build the migration sweep transaction BEFORE persisting anything, so an
     // unfunded federation (nothing to sweep) fails cleanly without leaving a
@@ -251,7 +255,10 @@ pub async fn migrate_post(
         proposer = %user.email, "federation migration opened (pending version + sweep tx)"
     );
 
-    Ok(Redirect::to(&format!("/federations/{federation_id}/proposals/{proposal_id}")).into_response())
+    Ok(Redirect::to(&format!(
+        "/federations/{federation_id}/proposals/{proposal_id}"
+    ))
+    .into_response())
 }
 
 // ---------------------------------------------------------------------------

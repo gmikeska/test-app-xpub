@@ -1355,13 +1355,13 @@ mod tests {
     #![allow(clippy::similar_names)]
 
     use super::{
-        cancel_migration, create_pending_migration, current_version_for_lineage,
-        enact_version_transition, find_federation_by_id, find_migration_by_id,
-        find_signer_for_user_in_version, inflight_migration_for_lineage,
-        insert_federation_with_members, insert_migration, insert_migration_proposal,
-        lineages_visible_to_user, list_migration_changes,
+        NewFederation, NewMigration, NewPendingMigration, cancel_migration,
+        create_pending_migration, current_version_for_lineage, enact_version_transition,
+        find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
+        inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
+        insert_migration_proposal, lineages_visible_to_user, list_migration_changes,
         load_lineage_versions, migration_enactment_for_proposal, set_migration_status,
-        set_migration_target_version, NewFederation, NewMigration, NewPendingMigration,
+        set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1732,9 +1732,16 @@ mod tests {
 
         // After enacting, the query is idempotent (no double-flip on re-broadcast).
         enact_version_transition(&pool, pending, lineage, migration).await?;
-        assert!(migration_enactment_for_proposal(&pool, proposal).await?.is_none());
+        assert!(
+            migration_enactment_for_proposal(&pool, proposal)
+                .await?
+                .is_none()
+        );
         assert_eq!(
-            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            current_version_for_lineage(&pool, lineage)
+                .await?
+                .unwrap()
+                .id,
             pending
         );
         Ok(())
@@ -1747,7 +1754,10 @@ mod tests {
         cancel_migration(&pool, migration).await?;
 
         assert_eq!(
-            find_migration_by_id(&pool, migration).await?.unwrap().status,
+            find_migration_by_id(&pool, migration)
+                .await?
+                .unwrap()
+                .status,
             "cancelled"
         );
         assert_eq!(
@@ -1760,7 +1770,11 @@ mod tests {
             "active"
         );
         // The lineage is free to start a new migration.
-        assert!(inflight_migration_for_lineage(&pool, lineage).await?.is_none());
+        assert!(
+            inflight_migration_for_lineage(&pool, lineage)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 }
