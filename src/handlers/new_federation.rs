@@ -301,7 +301,7 @@ async fn resolve_member_signers(
 /// `DeviceType::Trezor` → `"Trezor"` → `DeviceType::Trezor`. Any value
 /// we don't recognise falls through to [`DeviceType::Generic`] rather
 /// than failing the federation build.
-fn parse_device_type(s: &str) -> DeviceType {
+pub(crate) fn parse_device_type(s: &str) -> DeviceType {
     match s {
         "Trezor" => DeviceType::Trezor,
         "Jade" => DeviceType::Jade,

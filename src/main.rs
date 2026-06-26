@@ -14,6 +14,7 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod lineage;
 mod migration;
 mod models;
 mod wallet;

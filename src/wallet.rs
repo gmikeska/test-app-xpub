@@ -108,6 +108,18 @@ pub enum WalletError {
         source: Box<bdk_wallet::descriptor::error::Error>,
     },
 
+    /// Rebuilding a version's `Federation` from its members' stored signers
+    /// failed (a member has no recorded signer, a `descriptor_key` no longer
+    /// parses, or the federation parameters are invalid). Used by the
+    /// lineage-scoped `BtcFederatedWallet` reconstruction.
+    #[error("federation `{id}`: cannot reconstruct federation from members: {reason}")]
+    ReconstructFederation {
+        /// Federation (version) id.
+        id: Uuid,
+        /// Human-readable cause.
+        reason: String,
+    },
+
     /// Couldn't connect a freshly-emitted block to the wallet's local chain.
     /// This usually means bitcoind reorged below what we last persisted.
     #[error("federation `{id}`: applying block at height {height} failed: {source}")]
@@ -342,6 +354,51 @@ impl WalletManager {
 
         let mut cache = self.cache.lock().await;
         Ok(cache.entry(federation_id).or_insert(fw).clone())
+    }
+
+    /// Reconstruct the lineage-scoped [`crate::lineage::LineageWallet`] — a
+    /// `BtcFederatedWallet` stacking every version of `lineage_id`, oldest first
+    /// — from the DB.
+    ///
+    /// Read-only: each version's watch-only wallet is rebuilt from its persisted
+    /// changeset (or fresh from its descriptor) **without** persisting, and its
+    /// federation is recovered from its members' signers. The operational
+    /// per-version wallet ([`load_or_init`](Self::load_or_init)) is unaffected,
+    /// so single-version behaviour is unchanged.
+    ///
+    /// # Errors
+    /// See [`WalletError`] — notably [`WalletError::NotFound`] for an unknown or
+    /// empty lineage and [`WalletError::ReconstructFederation`] when a version's
+    /// federation can't be rebuilt.
+    #[allow(dead_code)] // consumed by the lineage/visibility handlers in Phase 5
+    pub async fn load_lineage(
+        &self,
+        lineage_id: Uuid,
+    ) -> Result<crate::lineage::LineageWallet, WalletError> {
+        let versions = db::load_lineage_versions(&self.pool, lineage_id).await?;
+        if versions.is_empty() {
+            return Err(WalletError::NotFound(lineage_id));
+        }
+
+        let mut reconstructed = Vec::with_capacity(versions.len());
+        for row in &versions {
+            let network = Network::from_str(&row.network).map_err(|_| WalletError::BadNetwork {
+                id: row.id,
+                network: row.network.clone(),
+            })?;
+            let members = db::list_federation_members_with_signers(&self.pool, row.id).await?;
+            let federation =
+                crate::lineage::reconstruct_federation(row.id, row.threshold, network, &members)?;
+            let wallet = crate::lineage::build_version_wallet(
+                row.id,
+                network,
+                &row.descriptor,
+                row.bdk_changeset.clone(),
+            )?;
+            reconstructed.push((row.id, federation, wallet));
+        }
+
+        crate::lineage::LineageWallet::from_versions(lineage_id, reconstructed)
     }
 }
 
