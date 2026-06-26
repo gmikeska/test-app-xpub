@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use asterism_core::{BtcFederatedWallet, Federation, FederatedWallet, NetworkType};
+use asterism_core::{BtcFederatedWallet, FederatedWallet, Federation, NetworkType};
 use asterism_xpub::ExternalSigner;
 use bdk_wallet::{ChangeSet, Wallet};
 use bitcoin::{Amount, Network};
@@ -65,13 +65,12 @@ impl LineageWallet {
         })?;
         let mut version_ids = vec![first_id];
         for (id, federation, wallet) in versions {
-            inner =
-                inner
-                    .with_federation(federation, wallet)
-                    .map_err(|e| WalletError::ReconstructFederation {
-                        id,
-                        reason: e.to_string(),
-                    })?;
+            inner = inner.with_federation(federation, wallet).map_err(|e| {
+                WalletError::ReconstructFederation {
+                    id,
+                    reason: e.to_string(),
+                }
+            })?;
             version_ids.push(id);
         }
         Ok(Self {
