@@ -153,8 +153,24 @@ struct ReceiveTemplate {
     federation: FederationView,
     cosigners: Vec<CosignerView>,
     balance: BalanceView,
-    addresses: Vec<AddressView>,
+    /// One panel per version the viewer is entitled to (newest first); the
+    /// panel for the page's `federation_id` is `selected` by default.
+    federation_groups: Vec<FederationGroupView>,
     active_tab: &'static str,
+}
+
+/// A version's address panel in the version-tabbed receive view.
+struct FederationGroupView {
+    /// `version_index` — stable id for the tab/panel.
+    version: i32,
+    /// This version's `federation_id` — for address-detail links.
+    federation_id: Uuid,
+    /// Tab label, e.g. `"v1 (current)"` / `"v2"`.
+    label: String,
+    /// The default-open panel (the version the user navigated to).
+    selected: bool,
+    /// Revealed external addresses for this version.
+    addresses: Vec<AddressView>,
 }
 
 /// Send tab — proposal form + proposals table.
@@ -192,23 +208,45 @@ pub async fn receive(
 ) -> Result<Response, AppError> {
     let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
 
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let sync = fw.sync().await?;
-    tracing::debug!(
-        federation_id = %federation_id,
-        tip = sync.tip_height,
-        new_blocks = sync.new_blocks,
-        new_mempool_txs = sync.new_mempool_txs,
-        "synced federation wallet",
-    );
+    // Show addresses for every version the viewer is entitled to (newest first),
+    // as tabs; default to the version they navigated to (`federation_id`). The
+    // header card (balance / descriptor / cosigners) reflects that version.
+    let entitled = db::entitled_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
 
-    let addresses_raw = fw.reveal_addresses(REVEAL_COUNT).await?;
-    let addresses = addresses_raw.into_iter().map(AddressView::from).collect();
-    let reserved_sat = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
+    let mut federation_groups = Vec::with_capacity(entitled.len());
+    let mut header_tip = federation.tip_height;
+    let mut header_balance: Option<BalanceView> = None;
+    for v in &entitled {
+        let vw = state.wallets.load_or_init(v.id).await?;
+        let sync = vw.sync().await?;
+        let addresses = vw
+            .reveal_addresses(REVEAL_COUNT)
+            .await?
+            .into_iter()
+            .map(AddressView::from)
+            .collect();
+        let label = if v.status == "active" {
+            format!("v{} (current)", v.version_index + 1)
+        } else {
+            format!("v{}", v.version_index + 1)
+        };
+        if v.id == federation_id {
+            header_tip = sync.tip_height;
+            let reserved = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+            header_balance = Some(BalanceView::from_balance(&vw.balance().await, reserved));
+        }
+        federation_groups.push(FederationGroupView {
+            version: v.version_index,
+            federation_id: v.id,
+            label,
+            selected: v.id == federation_id,
+            addresses,
+        });
+    }
 
+    let balance = header_balance.ok_or_else(|| AppError::Forbidden)?;
     let federation = FederationView {
-        tip_height: sync.tip_height,
+        tip_height: header_tip,
         ..federation
     };
 
@@ -217,7 +255,7 @@ pub async fn receive(
         federation,
         cosigners,
         balance,
-        addresses,
+        federation_groups,
         active_tab: "receive",
     }
     .into_response())

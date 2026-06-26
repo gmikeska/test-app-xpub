@@ -895,6 +895,30 @@ mod versioning {
         .await
     }
 
+    /// All versions of `lineage_id` that `user_id` is a member of, **newest
+    /// first** (highest `version_index` first). Drives the per-version address
+    /// tabs: a removed signer still sees their historic versions, and a new
+    /// signer sees only theirs (req 6/7).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn entitled_versions_for_user(
+        pool: &PgPool,
+        lineage_id: Uuid,
+        user_id: Uuid,
+    ) -> sqlx::Result<Vec<FederationRow>> {
+        sqlx::query_as::<_, FederationRow>(&format!(
+            "SELECT {FEDERATION_COLS} FROM federations f \
+             JOIN federation_members m ON m.federation_id = f.id \
+             WHERE f.lineage_id = $1 AND m.user_id = $2 \
+             ORDER BY f.version_index DESC"
+        ))
+        .bind(lineage_id)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+    }
+
     /// The signer `user_id` contributes to **this specific** federation version, if
     /// any. Drives per-version signing eligibility: `Some` ⇒ the user is asked to
     /// sign proposals/migrations/relays spending this version; `None` ⇒ they are a
@@ -1404,7 +1428,8 @@ mod tests {
     use super::{
         NewFederation, NewMigration, NewPendingMigration, cancel_migration,
         create_pending_migration, current_version_for_lineage, enact_version_transition,
-        find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
+        entitled_versions_for_user, find_federation_by_id, find_migration_by_id,
+        find_signer_for_user_in_version,
         inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
         insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
         list_federations_for_user, list_migration_changes, load_lineage_versions,
@@ -1859,6 +1884,41 @@ mod tests {
         assert_eq!(entries[0].id, v1);
         assert_eq!(entries[0].version_index, 1);
         assert_eq!(entries[0].status, "active");
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn entitled_versions_drive_per_version_tabs(pool: PgPool) -> sqlx::Result<()> {
+        // v0 = {alice, bob}; migrate → v1 = {alice, carol} (bob removed, carol added).
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+        let carol = mk_user(&pool, "carol@example.com").await?;
+        let carol_signer = mk_signer(&pool, carol, "fpc").await?;
+
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        mk_member(&pool, lineage, bob, Some(bob_signer)).await?;
+        set_federation_status(&pool, lineage, "superseded").await?;
+        let v1 = mk_version(&pool, lineage, 1, "active", Some(lineage)).await?;
+        mk_member(&pool, v1, alice, Some(alice_signer)).await?;
+        mk_member(&pool, v1, carol, Some(carol_signer)).await?;
+
+        // alice (kept): both versions, newest first.
+        let a: Vec<Uuid> = entitled_versions_for_user(&pool, lineage, alice)
+            .await?
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(a, vec![v1, lineage]);
+        // bob (removed): historic v0 only (req 6).
+        let b = entitled_versions_for_user(&pool, lineage, bob).await?;
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].id, lineage);
+        // carol (new): current v1 only — never sees the version predating her (req 7).
+        let c = entitled_versions_for_user(&pool, lineage, carol).await?;
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].id, v1);
         Ok(())
     }
 
