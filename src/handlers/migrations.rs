@@ -32,79 +32,17 @@ use crate::auth::AuthUser;
 use crate::db::{self, NewPendingMigration};
 use crate::error::AppError;
 use crate::federation_build::build_federation;
+use crate::handlers::federations::{BalanceView, CosignerView, FederationView, load_header};
 use crate::handlers::new_federation::{parse_device_type, resolve_member_signers};
 use crate::roster::{RosterAction, compute_roster_plan, validate_threshold};
 
 // ---------------------------------------------------------------------------
-// GET /federations/{id}/migrate
+// Member view (shared by the Federation tab's migrate form)
 // ---------------------------------------------------------------------------
-
-#[derive(Template, WebTemplate)]
-#[template(path = "migration_new.html")]
-struct MigrationNewTemplate {
-    email: String,
-    federation_id: Uuid,
-    label: String,
-    network: String,
-    threshold: i32,
-    current_members: Vec<MemberView>,
-    candidates: Vec<MemberView>,
-}
 
 struct MemberView {
     user_id: Uuid,
     email: String,
-}
-
-/// `GET /federations/{id}/migrate`
-///
-/// # Errors
-/// - [`AppError::NotFound`] if the federation doesn't exist.
-/// - [`AppError::BadRequest`] if it isn't the current (active) version or a
-///   migration is already in flight for its lineage.
-/// - [`AppError::Forbidden`] if the user isn't a current member.
-/// - Any underlying SQL error.
-pub async fn migrate_get(
-    State(state): State<Arc<AppState>>,
-    AuthUser(user): AuthUser,
-    Path(federation_id): Path<Uuid>,
-) -> Result<Response, AppError> {
-    let federation = load_active_current(&state, federation_id).await?;
-    ensure_member(&state, federation_id, user.id).await?;
-    ensure_no_inflight(&state, federation.lineage_id).await?;
-
-    let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
-    let current_ids: HashSet<Uuid> = members.iter().map(|(u, _)| u.id).collect();
-    let current_members: Vec<MemberView> = members
-        .iter()
-        .map(|(u, _)| MemberView {
-            user_id: u.id,
-            email: u.email.clone(),
-        })
-        .collect();
-
-    // Addable candidates: users with a P2WSH signer who aren't already members.
-    let path = &state.config.federation_derivation_path;
-    let candidates: Vec<MemberView> = db::list_users_with_p2wsh_signer_status(&state.db, path)
-        .await?
-        .into_iter()
-        .filter(|row| row.has_p2wsh_signer && !current_ids.contains(&row.user.id))
-        .map(|row| MemberView {
-            user_id: row.user.id,
-            email: row.user.email,
-        })
-        .collect();
-
-    Ok(MigrationNewTemplate {
-        email: user.email,
-        federation_id,
-        label: federation.label,
-        network: federation.network,
-        threshold: federation.threshold,
-        current_members,
-        candidates,
-    }
-    .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -287,15 +225,24 @@ pub async fn cancel_post(
 }
 
 // ---------------------------------------------------------------------------
-// GET /federations/{id}/lineage  — version history + relay surface (req 6 & 7)
+// GET /federations/{id}/federation  — the merged "Federation" tab:
+//   version history (req 6 & 7) + the migrate form (when eligible)
 // ---------------------------------------------------------------------------
 
 #[derive(Template, WebTemplate)]
-#[template(path = "lineage.html")]
-struct LineageTemplate {
+#[template(path = "federation_manage.html")]
+struct FederationManageTemplate {
     email: String,
-    lineage_label: String,
+    /// Page header (the version the user navigated to).
+    federation: FederationView,
+    cosigners: Vec<CosignerView>,
+    balance: BalanceView,
+    /// Every version of the lineage, with per-version balance / status / relay.
     versions: Vec<VersionView>,
+    /// The migrate form — `Some` only when the viewer is a current signer of the
+    /// active version and no migration is in flight.
+    migrate: Option<MigrateFormView>,
+    active_tab: &'static str,
 }
 
 struct VersionView {
@@ -310,50 +257,60 @@ struct VersionView {
     relay_available: bool,
 }
 
-/// `GET /federations/{id}/lineage`
+/// The roster-change form embedded in the Federation tab. Targets the lineage's
+/// **active** version (the form posts to `/federations/{active_id}/migrations`).
+struct MigrateFormView {
+    active_id: Uuid,
+    threshold: i32,
+    current_members: Vec<MemberView>,
+    candidates: Vec<MemberView>,
+}
+
+/// `GET /federations/{id}/federation`
 ///
-/// Show every version of the lineage `{id}` belongs to — visible to **any**
-/// member of **any** version (lineage-wide visibility, req 7) — with per-version
-/// balances and a relay action on superseded versions still holding funds
-/// (req 6). Whether the viewer can *sign* a version is per-version (req 6/7).
+/// The Federation tab: the lineage's version history (visible to any member of
+/// any version — req 7 — with per-version balances + relay on funded superseded
+/// versions — req 6) **and** the migrate form (shown only to a current signer of
+/// the active version when no migration is in flight).
 ///
 /// # Errors
 /// - [`AppError::NotFound`] if the federation doesn't exist.
-/// - [`AppError::Forbidden`] if the viewer is a member of no version of the lineage.
+/// - [`AppError::Forbidden`] if the viewer isn't a member of `{id}`.
 /// - Any underlying SQL/wallet error.
-pub async fn lineage_get(
+pub async fn federation_manage(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let federation = db::find_federation_by_id(&state.db, federation_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
-    let lineage_id = federation.lineage_id;
+    // Header + membership check for the page's version.
+    let (header, cosigners) = load_header(&state, federation_id, user.id).await?;
+    let lineage_id = header.lineage_id;
 
-    // Visibility is lineage-wide: a member of *any* version sees them all (req 7).
-    if !db::lineages_visible_to_user(&state.db, user.id)
-        .await?
-        .contains(&lineage_id)
-    {
-        return Err(AppError::Forbidden);
-    }
+    // Balance for the header (the page's version).
+    let fw = state.wallets.load_or_init(federation_id).await?;
+    let sync = fw.sync().await?;
+    let reserved = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    let balance = BalanceView::from_balance(&fw.balance().await, reserved);
+    let federation = FederationView {
+        tip_height: sync.tip_height,
+        ..header
+    };
 
-    // Freshen balances across all versions (sync fan-out). Best-effort: a node
-    // outage shouldn't hide the version history — render cached balances.
+    // Version history. Freshen all versions (best-effort — a node outage
+    // shouldn't hide the history).
     if let Err(e) = state.wallets.sync_lineage(lineage_id).await {
         tracing::warn!(error = %e, %lineage_id, "lineage sync failed; rendering cached balances");
     }
-
-    let versions = db::load_lineage_versions(&state.db, lineage_id).await?;
-    let current_id = db::current_version_for_lineage(&state.db, lineage_id)
-        .await?
-        .map(|f| f.id);
+    // Versions the viewer may see: a current signer sees all of them; an
+    // old-only signer sees only the versions they're a member of.
+    let versions = db::visible_versions_for_user(&state.db, lineage_id, user.id).await?;
+    let current = db::current_version_for_lineage(&state.db, lineage_id).await?;
+    let current_id = current.as_ref().map(|f| f.id);
 
     let mut version_views = Vec::with_capacity(versions.len());
     for v in &versions {
         let wallet = state.wallets.load_or_init(v.id).await?;
-        let balance = wallet.balance().await.total();
+        let bal = wallet.balance().await.total();
         let viewer_can_sign = db::find_signer_for_user_in_version(&state.db, user.id, v.id)
             .await?
             .is_some();
@@ -363,18 +320,72 @@ pub async fn lineage_get(
             version_index: v.version_index,
             status: v.status.clone(),
             is_current,
-            balance_btc: format!("{:.8}", balance.to_btc()),
+            balance_btc: format!("{:.8}", bal.to_btc()),
             viewer_can_sign,
-            relay_available: !is_current && balance > Amount::ZERO,
+            // Relay is only offered on a funded superseded version the viewer can
+            // actually sign for (so a current signer doesn't see a relay button on
+            // a historic version they can't sign).
+            relay_available: !is_current && bal > Amount::ZERO && viewer_can_sign,
         });
     }
 
-    Ok(LineageTemplate {
+    // Migrate form: only a current signer of the active version, no in-flight migration.
+    let migrate = if let Some(c) = &current {
+        let is_current_signer = db::find_signer_for_user_in_version(&state.db, user.id, c.id)
+            .await?
+            .is_some();
+        let no_inflight = db::inflight_migration_for_lineage(&state.db, lineage_id)
+            .await?
+            .is_none();
+        if is_current_signer && no_inflight {
+            let members = db::list_federation_members_with_signers(&state.db, c.id).await?;
+            let current_ids: HashSet<Uuid> = members.iter().map(|(u, _)| u.id).collect();
+            let current_members = members
+                .iter()
+                .map(|(u, _)| MemberView {
+                    user_id: u.id,
+                    email: u.email.clone(),
+                })
+                .collect();
+            let path = &state.config.federation_derivation_path;
+            let candidates = db::list_users_with_p2wsh_signer_status(&state.db, path)
+                .await?
+                .into_iter()
+                .filter(|row| row.has_p2wsh_signer && !current_ids.contains(&row.user.id))
+                .map(|row| MemberView {
+                    user_id: row.user.id,
+                    email: row.user.email,
+                })
+                .collect();
+            Some(MigrateFormView {
+                active_id: c.id,
+                threshold: c.threshold,
+                current_members,
+                candidates,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(FederationManageTemplate {
         email: user.email,
-        lineage_label: federation.label,
+        federation,
+        cosigners,
+        balance,
         versions: version_views,
+        migrate,
+        active_tab: "federation",
     }
     .into_response())
+}
+
+/// Redirect the retired `/lineage` and `/migrate` tabs to the merged
+/// `/federation` tab (back-compat for bookmarks/links).
+pub async fn redirect_to_federation(Path(federation_id): Path<Uuid>) -> Redirect {
+    Redirect::to(&format!("/federations/{federation_id}/federation"))
 }
 
 // ---------------------------------------------------------------------------

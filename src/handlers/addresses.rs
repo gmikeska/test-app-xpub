@@ -94,8 +94,16 @@ pub async fn show(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
 
+    // View access: a member of this version, OR a current signer of the lineage
+    // (who may view historic versions' addresses read-only — mirrors the
+    // version-visibility rule for the address tabs).
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
-        return Err(AppError::Forbidden);
+        let status =
+            crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
+                .await?;
+        if !status.is_current_signer {
+            return Err(AppError::Forbidden);
+        }
     }
 
     let fw = state.wallets.load_or_init(federation_id).await?;

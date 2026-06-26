@@ -208,16 +208,17 @@ pub async fn receive(
 ) -> Result<Response, AppError> {
     let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
 
-    // Show addresses for every version the viewer is entitled to (newest first),
-    // as tabs; default to the version they navigated to (`federation_id`). The
-    // header card (balance / descriptor / cosigners) reflects that version.
-    let entitled =
-        db::entitled_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
+    // Show addresses for every version the viewer may see (newest first), as
+    // tabs; default to the version they navigated to (`federation_id`). A current
+    // signer sees all versions (view-only on historic ones); an old-only signer
+    // sees only theirs. The header card reflects the navigated version.
+    let visible =
+        db::visible_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
 
-    let mut federation_groups = Vec::with_capacity(entitled.len());
+    let mut federation_groups = Vec::with_capacity(visible.len());
     let mut header_tip = federation.tip_height;
     let mut header_balance: Option<BalanceView> = None;
-    for v in &entitled {
+    for v in visible.iter().rev() {
         let vw = state.wallets.load_or_init(v.id).await?;
         let sync = vw.sync().await?;
         let addresses = vw

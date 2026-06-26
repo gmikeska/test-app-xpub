@@ -1,0 +1,105 @@
+{% extends "_federation_layout.html" %}
+
+{% block tab_body %}
+<section class="card">
+  <h2>Versions</h2>
+  <p class="muted">
+    Every version of this federation. You can see inflows to all versions you're a member of, but
+    you're only asked to sign for the versions you belong to. Funds that arrive at a superseded
+    version can be <strong>relayed</strong> forward to the current version by its signers.
+  </p>
+  <ul class="member-list">
+    {% for v in versions %}
+    <li>
+      <div>
+        <strong>v{{ v.version_index }}</strong>
+        {% if v.is_current %}<span class="badge">current</span>{% else %}<span class="muted">{{ v.status }}</span>{% endif %}
+        — {{ v.balance_btc }} BTC
+        {% if v.viewer_can_sign %}<span class="muted">· you can sign</span>{% else %}<span class="muted">· view-only</span>{% endif %}
+      </div>
+      <div class="action-row">
+        <a class="link" href="/federations/{{ v.federation_id }}/receive">Receive / history</a>
+        {% if v.relay_available %}
+        <form method="post" action="/federations/{{ v.federation_id }}/relay" class="inline-form">
+          <input type="number" name="fee_rate" min="1" step="1" value="2" title="fee rate (sat/vB)">
+          <button type="submit" class="primary">Relay funds to current</button>
+        </form>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Start a migration</h2>
+  {% if let Some(m) = migrate %}
+  <p class="muted">
+    Change the roster of the current federation. You can remove current members and add new ones in
+    a single migration. This mints a <strong>pending</strong> successor version — no funds move until
+    the migration transaction is signed and broadcast.
+  </p>
+  <form method="post" action="/federations/{{ m.active_id }}/migrations" class="stack-form">
+    <label>
+      <span>New threshold (m, signatures required)</span>
+      <input type="number" name="threshold" required min="1" step="1" value="{{ m.threshold }}">
+    </label>
+
+    <label>
+      <span>Fee rate (sat/vB) for the migration sweep</span>
+      <input type="number" name="fee_rate" required min="1" step="1" value="2">
+    </label>
+
+    <fieldset class="member-picker">
+      <legend>Current members</legend>
+      <p class="muted">Uncheck a member to remove them from the next version.</p>
+      <ul class="roster-list">
+        {% for u in m.current_members %}
+        <li>
+          <label>
+            <input type="checkbox" name="remove_ids" value="{{ u.user_id }}">
+            <span>Remove {{ u.email }}</span>
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+    </fieldset>
+
+    <fieldset class="member-picker">
+      <legend>Add members</legend>
+      <p class="muted">
+        Users with a P2WSH signer onboarded who aren't current members. Check anyone you'd like to
+        add to the next version.
+      </p>
+      {% if m.candidates.is_empty() %}
+      <p class="muted">No eligible users to add.</p>
+      {% else %}
+      <ul class="roster-list">
+        {% for c in m.candidates %}
+        <li>
+          <label>
+            <input type="checkbox" name="add_ids" value="{{ c.user_id }}">
+            <span>Add {{ c.email }}</span>
+          </label>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+    </fieldset>
+
+    <div class="action-row">
+      <button type="submit" class="primary">Create migration</button>
+    </div>
+  </form>
+  {% else %}
+  <p class="muted">Only a current signer can start a migration, and only one migration may be in progress at a time.</p>
+  {% endif %}
+</section>
+
+<style>
+  .member-picker .roster-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .member-picker .roster-list label { display: flex; flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+  .member-picker .roster-list input[type="checkbox"] { width: auto; margin: 0; }
+  .member-picker .roster-list label span { font-size: 1rem; color: inherit; }
+</style>
+{% endblock %}

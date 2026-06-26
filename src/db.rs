@@ -919,6 +919,38 @@ mod versioning {
         .await
     }
 
+    /// Versions of `lineage_id` the user may **view** (oldest first):
+    /// - a **current signer** (member of the active version) sees **all** versions
+    ///   — full history, view-only on the ones they weren't part of;
+    /// - an **old-only signer** sees only the versions they're a member of (they
+    ///   don't see the version(s) that replaced them).
+    ///
+    /// Signing/relay still respect per-version membership separately
+    /// ([`find_signer_for_user_in_version`]). Used by the Federation tab's version
+    /// list and the Receive tab's address tabs.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn visible_versions_for_user(
+        pool: &PgPool,
+        lineage_id: Uuid,
+        user_id: Uuid,
+    ) -> sqlx::Result<Vec<FederationRow>> {
+        let is_current_signer = match current_version_for_lineage(pool, lineage_id).await? {
+            Some(c) => find_signer_for_user_in_version(pool, user_id, c.id)
+                .await?
+                .is_some(),
+            None => false,
+        };
+        if is_current_signer {
+            load_lineage_versions(pool, lineage_id).await
+        } else {
+            let mut versions = entitled_versions_for_user(pool, lineage_id, user_id).await?;
+            versions.sort_by_key(|f| f.version_index);
+            Ok(versions)
+        }
+    }
+
     /// The signer `user_id` contributes to **this specific** federation version, if
     /// any. Drives per-version signing eligibility: `Some` ⇒ the user is asked to
     /// sign proposals/migrations/relays spending this version; `None` ⇒ they are a
@@ -1434,7 +1466,7 @@ mod tests {
         insert_relay_proposal, lineages_visible_to_user, list_federations_for_user,
         list_migration_changes, load_lineage_versions, migration_enactment_for_proposal,
         most_recent_entitled_versions_for_user, set_federation_status, set_migration_status,
-        set_migration_target_version,
+        set_migration_target_version, visible_versions_for_user,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1919,6 +1951,47 @@ mod tests {
         let c = entitled_versions_for_user(&pool, lineage, carol).await?;
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].id, v1);
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn visible_versions_asymmetric_by_current_signer(pool: PgPool) -> sqlx::Result<()> {
+        // v0 = {alice, bob}; migrate → v1 = {alice, carol} (bob removed, carol added).
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+        let carol = mk_user(&pool, "carol@example.com").await?;
+        let carol_signer = mk_signer(&pool, carol, "fpc").await?;
+
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        mk_member(&pool, lineage, bob, Some(bob_signer)).await?;
+        set_federation_status(&pool, lineage, "superseded").await?;
+        let v1 = mk_version(&pool, lineage, 1, "active", Some(lineage)).await?;
+        mk_member(&pool, v1, alice, Some(alice_signer)).await?;
+        mk_member(&pool, v1, carol, Some(carol_signer)).await?;
+
+        let alice_v: Vec<Uuid> = visible_versions_for_user(&pool, lineage, alice)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        let carol_v: Vec<Uuid> = visible_versions_for_user(&pool, lineage, carol)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        let bob_v: Vec<Uuid> = visible_versions_for_user(&pool, lineage, bob)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+
+        // current signers (kept alice + new carol) → all versions, oldest first.
+        assert_eq!(alice_v, vec![lineage, v1]);
+        assert_eq!(carol_v, vec![lineage, v1]);
+        // old-only signer (bob) → only the version he's a member of, not its successor.
+        assert_eq!(bob_v, vec![lineage]);
         Ok(())
     }
 

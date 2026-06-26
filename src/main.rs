@@ -151,8 +151,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::federations::redirect_to_default),
         )
         .route(
+            "/federations/{id}/federation",
+            get(handlers::migrations::federation_manage),
+        )
+        .route(
             "/federations/{id}/migrate",
-            get(handlers::migrations::migrate_get),
+            get(handlers::migrations::redirect_to_federation),
+        )
+        .route(
+            "/federations/{id}/lineage",
+            get(handlers::migrations::redirect_to_federation),
         )
         .route(
             "/federations/{id}/migrations",
@@ -161,10 +169,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/federations/{id}/migrations/{mid}/cancel",
             post(handlers::migrations::cancel_post),
-        )
-        .route(
-            "/federations/{id}/lineage",
-            get(handlers::migrations::lineage_get),
         )
         .route(
             "/federations/{id}/relay",
