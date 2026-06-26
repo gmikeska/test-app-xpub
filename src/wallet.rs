@@ -938,7 +938,7 @@ impl FederationWallet {
                     }
                 })
                 .collect();
-            entries.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+            entries.sort_by_key(|e| e.sort_key);
 
             let pubkeys: Vec<TrezorMultisigPubkey> = entries
                 .into_iter()
@@ -1005,7 +1005,7 @@ impl FederationWallet {
                         }
                     })
                     .collect();
-                entries.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+                entries.sort_by_key(|e| e.sort_key);
                 let pubkeys: Vec<TrezorMultisigPubkey> = entries
                     .into_iter()
                     .map(|e| TrezorMultisigPubkey {
