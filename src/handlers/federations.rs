@@ -212,8 +212,7 @@ pub async fn receive(
     // tabs; default to the version they navigated to (`federation_id`). A current
     // signer sees all versions (view-only on historic ones); an old-only signer
     // sees only theirs. The header card reflects the navigated version.
-    let visible =
-        db::visible_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
+    let visible = db::visible_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
 
     let mut federation_groups = Vec::with_capacity(visible.len());
     let mut header_tip = federation.tip_height;
