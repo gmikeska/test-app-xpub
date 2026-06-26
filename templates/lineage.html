@@ -30,7 +30,7 @@
         — {{ v.balance_btc }} BTC
         {% if v.viewer_can_sign %}<span class="muted">· you can sign</span>{% else %}<span class="muted">· view-only</span>{% endif %}
       </div>
-      <div class="actions">
+      <div class="action-row">
         <a class="link" href="/federations/{{ v.federation_id }}/receive">Receive / history</a>
         {% if v.is_current && v.viewer_can_sign %}
         <a class="link" href="/federations/{{ v.federation_id }}/migrate">Start a migration</a>

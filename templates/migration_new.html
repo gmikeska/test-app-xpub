@@ -35,12 +35,12 @@
     <fieldset class="member-picker">
       <legend>Current members</legend>
       <p class="muted">Uncheck a member to remove them from the next version.</p>
-      <ul class="member-list">
+      <ul class="roster-list">
         {% for m in current_members %}
         <li>
           <label>
             <input type="checkbox" name="remove_ids" value="{{ m.user_id }}">
-            Remove {{ m.email }}
+            <span>Remove {{ m.email }}</span>
           </label>
         </li>
         {% endfor %}
@@ -56,12 +56,12 @@
       {% if candidates.is_empty() %}
       <p class="muted">No eligible users to add.</p>
       {% else %}
-      <ul class="member-list">
+      <ul class="roster-list">
         {% for c in candidates %}
         <li>
           <label>
             <input type="checkbox" name="add_ids" value="{{ c.user_id }}">
-            Add {{ c.email }}
+            <span>Add {{ c.email }}</span>
           </label>
         </li>
         {% endfor %}
@@ -69,10 +69,19 @@
       {% endif %}
     </fieldset>
 
-    <div class="actions">
+    <div class="action-row">
       <button type="submit" class="primary">Create migration</button>
       <a class="link" href="/federations/{{ federation_id }}">Cancel</a>
     </div>
   </form>
 </section>
+
+<style>
+  /* Lay each roster row out inline (checkbox + name), overriding the
+     stack-form's column layout used by the threshold/fee inputs above. */
+  .member-picker .roster-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .member-picker .roster-list label { display: flex; flex-direction: row; align-items: center; gap: 10px; cursor: pointer; }
+  .member-picker .roster-list input[type="checkbox"] { width: auto; margin: 0; }
+  .member-picker .roster-list label span { font-size: 1rem; color: inherit; }
+</style>
 {% endblock %}
