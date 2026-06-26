@@ -116,6 +116,8 @@ pub async fn migrate_get(
 pub struct MigrationForm {
     /// Threshold (`m`) for the next version.
     pub threshold: i32,
+    /// Fee rate (sat/vB) for the migration sweep transaction.
+    pub fee_rate: u64,
     /// User ids to add in the next version.
     #[serde(default)]
     pub add_ids: Vec<Uuid>,
@@ -185,14 +187,21 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    let built = build_federation(
-        signers,
-        threshold,
-        NetworkType::Bitcoin(state.config.network),
-    )
-    .map_err(AppError::BadFederationInput)?;
+    let built = build_federation(signers, threshold, NetworkType::Bitcoin(state.config.network))
+        .map_err(AppError::BadFederationInput)?;
 
-    // Persist: migration record + pending successor version (no funds touched).
+    // Build the migration sweep transaction BEFORE persisting anything, so an
+    // unfunded federation (nothing to sweep) fails cleanly without leaving a
+    // dangling pending version. The successor's destination is derived from its
+    // descriptor — its wallet will recognise the inflow once it syncs (§5.2).
+    let destination =
+        crate::wallet::first_external_address(state.config.network, &built.descriptor_string)?;
+    let current_wallet = state.wallets.load_or_init(federation_id).await?;
+    let built_tx = current_wallet
+        .build_migration_tx(&destination, body.fee_rate)
+        .await?;
+
+    // Persist: migration record + pending successor version (no funds moved yet).
     let next_members: Vec<(Uuid, Uuid)> =
         resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
     let changes: Vec<(Uuid, Option<Uuid>, &str)> = plan
@@ -223,12 +232,50 @@ pub async fn migrate_post(
     };
     let (migration_id, pending_id) = db::create_pending_migration(&state.db, &spec).await?;
 
+    // The sweep is a `kind='migration'` proposal signed by the CURRENT
+    // federation's members; the existing proposal UI drives signing → finalize
+    // → broadcast, and broadcast enacts the version flip (consent-by-signing).
+    let proposal_id = db::insert_migration_proposal(
+        &state.db,
+        federation_id,
+        user.id,
+        migration_id,
+        &built_tx.psbt_b64,
+        &built_tx.proposal_json,
+        &built_tx.coin_selection_json,
+    )
+    .await?;
+
     tracing::info!(
-        %migration_id, %pending_id, lineage = %federation.lineage_id,
-        proposer = %user.email, "federation migration opened (pending version minted)"
+        %migration_id, %pending_id, %proposal_id, lineage = %federation.lineage_id,
+        proposer = %user.email, "federation migration opened (pending version + sweep tx)"
     );
 
-    Ok(Redirect::to(&format!("/federations/{pending_id}")).into_response())
+    Ok(Redirect::to(&format!("/federations/{federation_id}/proposals/{proposal_id}")).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /federations/{id}/migrations/{mid}/cancel
+// ---------------------------------------------------------------------------
+
+/// `POST /federations/{id}/migrations/{mid}/cancel`
+///
+/// Cancel an in-flight migration before broadcast: abandon the pending version
+/// and cancel its sweep proposal, freeing the lineage to start a new migration.
+/// Members only.
+///
+/// # Errors
+/// - [`AppError::Forbidden`] if the user isn't a member of the base federation.
+/// - Any underlying SQL error.
+pub async fn cancel_post(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path((federation_id, migration_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, AppError> {
+    ensure_member(&state, federation_id, user.id).await?;
+    db::cancel_migration(&state.db, migration_id).await?;
+    tracing::info!(%migration_id, by = %user.email, "federation migration cancelled");
+    Ok(Redirect::to(&format!("/federations/{federation_id}")).into_response())
 }
 
 // ---------------------------------------------------------------------------

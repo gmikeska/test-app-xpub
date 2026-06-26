@@ -402,6 +402,24 @@ impl WalletManager {
     }
 }
 
+/// Derive a federation descriptor's first external address **without**
+/// persisting a wallet — used to route a migration sweep to a not-yet-persisted
+/// successor version (so the sweep can be built and validated before the
+/// pending version is committed).
+///
+/// # Errors
+/// [`WalletError::CreateWallet`] if the descriptor is rejected.
+pub fn first_external_address(network: Network, descriptor: &str) -> Result<Address, WalletError> {
+    let wallet = Wallet::create_from_two_path_descriptor(descriptor.to_owned())
+        .network(network)
+        .create_wallet_no_persist()
+        .map_err(|source| WalletError::CreateWallet {
+            id: Uuid::nil(),
+            source: Box::new(source),
+        })?;
+    Ok(wallet.peek_address(KeychainKind::External, 0).address)
+}
+
 // ---------------------------------------------------------------------------
 // Per-federation wallet
 // ---------------------------------------------------------------------------
@@ -774,6 +792,102 @@ impl FederationWallet {
             proposal_json,
             coin_selection_json,
         })
+    }
+
+    /// Reveal and return this wallet's first external (receive) address. Used to
+    /// route a migration sweep into a successor version's wallet so it later
+    /// recognises the inflow as its own once synced.
+    ///
+    /// # Errors
+    /// Propagates persistence errors from writing the reveal-induced changeset.
+    pub async fn reveal_first_external(&self) -> Result<Address, WalletError> {
+        let (address, delta, tip) = {
+            let mut wallet = self.inner.lock().await;
+            let _ = wallet
+                .reveal_addresses_to(KeychainKind::External, 0)
+                .count();
+            let address = wallet.peek_address(KeychainKind::External, 0).address;
+            let delta = wallet.take_staged();
+            let tip = wallet.latest_checkpoint().height();
+            drop(wallet);
+            (address, delta, tip)
+        };
+        self.persist_delta(delta, tip).await?;
+        Ok(address)
+    }
+
+    /// Build the migration sweep PSBT: **drain** every UTXO of this (current)
+    /// version to `destination` (the successor version's address), with the fee
+    /// paid from the swept funds (treasury-pays). One input set → one output, no
+    /// change. Mirrors [`build_proposal`](Self::build_proposal) but drains, and
+    /// is the executor for the single-account `AccountForAccountSweep` plan.
+    ///
+    /// # Errors
+    /// - [`WalletError::BadFeeRate`] if `fee_rate_sat_vb` is zero.
+    /// - [`WalletError::CreateTx`] if BDK can't satisfy the drain (notably no
+    ///   spendable UTXOs — an unfunded federation has nothing to sweep).
+    /// - Persistence errors propagate as-is.
+    pub async fn build_migration_tx(
+        &self,
+        destination: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<BuiltProposal, WalletError> {
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
+
+        let (psbt, delta, tip) = {
+            let mut wallet = self.inner.lock().await;
+            let psbt = {
+                let mut builder = wallet.build_tx();
+                builder
+                    .drain_wallet()
+                    .drain_to(destination.script_pubkey())
+                    .fee_rate(fee_rate);
+                builder
+                    .finish()
+                    .map_err(|e| WalletError::CreateTx(e.to_string()))?
+            };
+            let delta = wallet.take_staged();
+            let tip = wallet.latest_checkpoint().height();
+            drop(wallet);
+            (psbt, delta, tip)
+        };
+
+        self.persist_delta(delta, tip).await?;
+
+        let (proposal_json, coin_selection_json) =
+            self.proposal_view_models(&psbt, destination).await;
+        Ok(BuiltProposal {
+            psbt_b64: psbt.to_string(),
+            proposal_json,
+            coin_selection_json,
+        })
+    }
+
+    /// Merge a staged changeset delta into the aggregate and persist it (no-op
+    /// when `delta` is `None`). Shared by the address-reveal and sweep-build
+    /// paths.
+    async fn persist_delta(
+        &self,
+        delta: Option<ChangeSet>,
+        tip: u32,
+    ) -> Result<(), WalletError> {
+        if let Some(delta) = delta {
+            let mut agg = self.aggregate.lock().await;
+            agg.merge(delta);
+            let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
+            drop(agg);
+            db::update_federation_changeset(
+                &self.pool,
+                self.id,
+                &json,
+                i32::try_from(tip).unwrap_or(i32::MAX),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Compute the cached `proposal_json` + `coin_selection_json` blobs that

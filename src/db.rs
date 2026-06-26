@@ -1229,6 +1229,115 @@ mod versioning {
         tx.commit().await?;
         Ok((migration_id, pending_id))
     }
+
+    /// Persist a migration's sweep transaction as a `kind = 'migration'`
+    /// proposal linked to its migration record. It is signed by the **source**
+    /// (`federation_id`) federation's members through the ordinary
+    /// proposal → sign → finalize → broadcast flow (consent-by-signing).
+    /// Returns the new proposal id.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn insert_migration_proposal(
+        pool: &PgPool,
+        federation_id: Uuid,
+        proposed_by: Uuid,
+        migration_id: Uuid,
+        psbt_b64: &str,
+        proposal_json: &serde_json::Value,
+        coin_selection_json: &serde_json::Value,
+    ) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO transaction_proposals \
+                (federation_id, proposed_by, label, kind, migration_id, \
+                 psbt_b64, proposal_json, coin_selection_json) \
+             VALUES ($1, $2, 'Federation migration', 'migration', $3, $4, $5, $6) \
+             RETURNING id",
+        )
+        .bind(federation_id)
+        .bind(proposed_by)
+        .bind(migration_id)
+        .bind(psbt_b64)
+        .bind(proposal_json)
+        .bind(coin_selection_json)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Version-flip inputs for a broadcast migration transaction.
+    #[allow(clippy::struct_field_names)] // the fields are genuinely all ids
+    pub struct MigrationEnactment {
+        /// The migration being enacted.
+        pub migration_id: Uuid,
+        /// The version to supersede (the migration's base / current version).
+        pub base_version_id: Uuid,
+        /// The pending version to activate.
+        pub target_version_id: Uuid,
+    }
+
+    /// If `proposal_id` is a migration transaction whose migration is still
+    /// `proposed` (not yet enacted) and has a pending target version, return the
+    /// version-flip inputs. `None` for ordinary sends, relays, already-enacted
+    /// migrations, or unlinked proposals — which makes broadcast enactment
+    /// idempotent (a re-broadcast can't double-flip).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn migration_enactment_for_proposal(
+        pool: &PgPool,
+        proposal_id: Uuid,
+    ) -> sqlx::Result<Option<MigrationEnactment>> {
+        let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+            "SELECT fm.id, fm.base_version_id, fm.target_version_id \
+             FROM transaction_proposals p \
+             JOIN federation_migrations fm ON fm.id = p.migration_id \
+             WHERE p.id = $1 AND p.kind = 'migration' \
+               AND fm.status = 'proposed' AND fm.target_version_id IS NOT NULL",
+        )
+        .bind(proposal_id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(
+            |(migration_id, base_version_id, target_version_id)| MigrationEnactment {
+                migration_id,
+                base_version_id,
+                target_version_id,
+            },
+        ))
+    }
+
+    /// Cancel an in-flight migration before broadcast: abandon its pending
+    /// version, cancel its (not-yet-broadcast) migration-transaction proposal,
+    /// and mark the migration `cancelled`. Atomic.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error; rolls back on any failure mid-way.
+    pub async fn cancel_migration(pool: &PgPool, migration_id: Uuid) -> sqlx::Result<()> {
+        let mut tx = pool.begin().await?;
+        sqlx::query(
+            "UPDATE federations SET status = 'abandoned' \
+             WHERE id = (SELECT target_version_id FROM federation_migrations WHERE id = $1) \
+               AND status = 'pending'",
+        )
+        .bind(migration_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE transaction_proposals SET status = 'cancelled', updated_at = now() \
+             WHERE migration_id = $1 AND status <> 'broadcast'",
+        )
+        .bind(migration_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE federation_migrations SET status = 'cancelled', updated_at = now() WHERE id = $1",
+        )
+        .bind(migration_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
 } // mod versioning
 
 // ---------------------------------------------------------------------------
@@ -1246,11 +1355,13 @@ mod tests {
     #![allow(clippy::similar_names)]
 
     use super::{
-        NewFederation, NewMigration, NewPendingMigration, create_pending_migration,
-        current_version_for_lineage, enact_version_transition, find_federation_by_id,
-        find_migration_by_id, find_signer_for_user_in_version, insert_federation_with_members,
-        insert_migration, lineages_visible_to_user, list_migration_changes, load_lineage_versions,
-        set_migration_status, set_migration_target_version,
+        cancel_migration, create_pending_migration, current_version_for_lineage,
+        enact_version_transition, find_federation_by_id, find_migration_by_id,
+        find_signer_for_user_in_version, inflight_migration_for_lineage,
+        insert_federation_with_members, insert_migration, insert_migration_proposal,
+        lineages_visible_to_user, list_migration_changes,
+        load_lineage_versions, migration_enactment_for_proposal, set_migration_status,
+        set_migration_target_version, NewFederation, NewMigration, NewPendingMigration,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1567,6 +1678,89 @@ mod tests {
                 .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
             "second in-flight migration must conflict: {err:?}"
         );
+        Ok(())
+    }
+
+    /// Open a migration (v0 → pending v1) with a trivial keep-only roster + its
+    /// sweep proposal, returning `(lineage/v0, migration, pending, proposal)`.
+    async fn open_migration(pool: &PgPool) -> sqlx::Result<(Uuid, Uuid, Uuid, Uuid)> {
+        let alice = mk_user(pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(pool, alice, "fpa").await?;
+        let lineage = mk_v0(pool, alice, alice_signer, "Treasury").await?;
+        let snap = json!({});
+        let next_members = [(alice, alice_signer)];
+        let changes: [(Uuid, Option<Uuid>, &str); 1] = [(alice, Some(alice_signer), "keep")];
+        let spec = NewPendingMigration {
+            lineage_id: lineage,
+            base_version_id: lineage,
+            proposed_by: alice,
+            next_threshold: 1,
+            description: None,
+            label: "Treasury",
+            network: "testnet",
+            descriptor: "wsh(sortedmulti(1,...))",
+            snapshot_json: &snap,
+            version_index: 1,
+            next_members: &next_members,
+            changes: &changes,
+        };
+        let (migration, pending) = create_pending_migration(pool, &spec).await?;
+        let proposal = insert_migration_proposal(
+            pool,
+            lineage,
+            alice,
+            migration,
+            "psbt-b64",
+            &json!({}),
+            &json!({}),
+        )
+        .await?;
+        Ok((lineage, migration, pending, proposal))
+    }
+
+    #[sqlx::test]
+    async fn migration_enactment_query_is_correct_and_idempotent(pool: PgPool) -> sqlx::Result<()> {
+        let (lineage, migration, pending, proposal) = open_migration(&pool).await?;
+
+        // A migration proposal yields the version-flip inputs.
+        let enact = migration_enactment_for_proposal(&pool, proposal)
+            .await?
+            .expect("enactment info for a proposed migration");
+        assert_eq!(enact.migration_id, migration);
+        assert_eq!(enact.base_version_id, lineage);
+        assert_eq!(enact.target_version_id, pending);
+
+        // After enacting, the query is idempotent (no double-flip on re-broadcast).
+        enact_version_transition(&pool, pending, lineage, migration).await?;
+        assert!(migration_enactment_for_proposal(&pool, proposal).await?.is_none());
+        assert_eq!(
+            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            pending
+        );
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn cancel_migration_abandons_pending_and_frees_lineage(pool: PgPool) -> sqlx::Result<()> {
+        let (lineage, migration, pending, _proposal) = open_migration(&pool).await?;
+
+        cancel_migration(&pool, migration).await?;
+
+        assert_eq!(
+            find_migration_by_id(&pool, migration).await?.unwrap().status,
+            "cancelled"
+        );
+        assert_eq!(
+            find_federation_by_id(&pool, pending).await?.unwrap().status,
+            "abandoned"
+        );
+        // The base version is untouched and still current.
+        assert_eq!(
+            find_federation_by_id(&pool, lineage).await?.unwrap().status,
+            "active"
+        );
+        // The lineage is free to start a new migration.
+        assert!(inflight_migration_for_lineage(&pool, lineage).await?.is_none());
         Ok(())
     }
 }

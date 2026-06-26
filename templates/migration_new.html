@@ -27,6 +27,11 @@
       <input type="number" name="threshold" required min="1" step="1" value="{{ threshold }}">
     </label>
 
+    <label>
+      <span>Fee rate (sat/vB) for the migration sweep</span>
+      <input type="number" name="fee_rate" required min="1" step="1" value="2">
+    </label>
+
     <fieldset class="member-picker">
       <legend>Current members</legend>
       <p class="muted">Uncheck a member to remove them from the next version.</p>

@@ -159,6 +159,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::migrations::migrate_post),
         )
         .route(
+            "/federations/{id}/migrations/{mid}/cancel",
+            post(handlers::migrations::cancel_post),
+        )
+        .route(
             "/federations/{id}/receive",
             get(handlers::federations::receive),
         )

@@ -575,6 +575,23 @@ pub async fn broadcast(
     db::mark_proposal_broadcast(&state.db, proposal_id, &txid.to_string()).await?;
     tracing::info!(%proposal_id, %txid, "broadcast finalized proposal");
 
+    // Consent-by-signing: broadcasting a migration transaction enacts the
+    // version flip (pending → active, predecessor → superseded). Idempotent —
+    // the query returns `None` once the migration is `enacted`.
+    if let Some(enact) = db::migration_enactment_for_proposal(&state.db, proposal_id).await? {
+        db::enact_version_transition(
+            &state.db,
+            enact.target_version_id,
+            enact.base_version_id,
+            enact.migration_id,
+        )
+        .await?;
+        tracing::info!(
+            %proposal_id, migration = %enact.migration_id,
+            new_version = %enact.target_version_id, "migration enacted: version flipped"
+        );
+    }
+
     Ok(Redirect::to(&format!(
         "/federations/{federation_id}/proposals/{proposal_id}"
     ))
