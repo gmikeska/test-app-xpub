@@ -97,7 +97,8 @@ pub async fn create(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
         let amount = parse_btc_amount(amount_str)?;
-        fw.build_proposal(&address, amount, form.fee_rate_sat_vb).await?
+        fw.build_proposal(&address, amount, form.fee_rate_sat_vb)
+            .await?
     } else {
         if let Some(current_id) = status.current_version_id {
             let current = state.wallets.load_or_init(current_id).await?;
@@ -110,7 +111,8 @@ pub async fn create(
             }
         }
         // Sweep the whole balance forward; the fee comes out of the swept amount.
-        fw.build_migration_tx(&address, form.fee_rate_sat_vb).await?
+        fw.build_migration_tx(&address, form.fee_rate_sat_vb)
+            .await?
     };
 
     let label_ref = form.label.as_deref().filter(|s| !s.trim().is_empty());
