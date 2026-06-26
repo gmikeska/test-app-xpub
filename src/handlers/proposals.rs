@@ -252,7 +252,7 @@ pub async fn detail(
     let viewer_already_signed = signed_by_user.contains_key(&user.id);
     let viewer_already_rejected = rejected_by_user.contains_key(&user.id);
 
-    let viewer_signer_row = db::find_signer_for_user(&state.db, user.id).await?;
+    let viewer_signer_row = db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
     let viewer_has_signer = viewer_signer_row.is_some();
 
     let detail_view = ProposalDetailView {
@@ -327,7 +327,7 @@ pub async fn sign_data(
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     require_status_in(&proposal, &["proposed", "signing"])?;
 
-    let signer = db::find_signer_for_user(&state.db, user.id)
+    let signer = db::find_signer_for_user_in_version(&state.db, user.id, federation_id)
         .await?
         .ok_or_else(|| AppError::BadRequest("you have no Trezor onboarded".to_string()))?;
 
@@ -397,7 +397,7 @@ pub async fn submit_signature(
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     require_status_in(&proposal, &["proposed", "signing"])?;
 
-    let signer = db::find_signer_for_user(&state.db, user.id)
+    let signer = db::find_signer_for_user_in_version(&state.db, user.id, federation_id)
         .await?
         .ok_or_else(|| AppError::BadRequest("you have no Trezor onboarded".to_string()))?;
 

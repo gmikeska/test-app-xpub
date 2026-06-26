@@ -400,6 +400,30 @@ impl WalletManager {
 
         crate::lineage::LineageWallet::from_versions(lineage_id, reconstructed)
     }
+
+    /// Sync **every** version's wallet in a lineage (sync fan-out), so historic
+    /// (superseded) versions pick up late inflows for relay detection — not just
+    /// the current version. Returns the per-version `(federation_id, summary)`.
+    ///
+    /// This is Phase 2's deferred fan-out, realised now that migrations create
+    /// multi-version lineages (design §6.3).
+    ///
+    /// # Errors
+    /// See [`WalletError`]; propagates the first sync/RPC/persistence error.
+    #[allow(dead_code)] // wired into the lineage view / relay flow
+    pub async fn sync_lineage(
+        &self,
+        lineage_id: Uuid,
+    ) -> Result<Vec<(Uuid, SyncSummary)>, WalletError> {
+        let versions = db::load_lineage_versions(&self.pool, lineage_id).await?;
+        let mut summaries = Vec::with_capacity(versions.len());
+        for row in &versions {
+            let fw = self.load_or_init(row.id).await?;
+            let summary = fw.sync().await?;
+            summaries.push((row.id, summary));
+        }
+        Ok(summaries)
+    }
 }
 
 /// Derive a federation descriptor's first external address **without**

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}{{ lineage_label }} — version history — Asterism{% endblock %}
+
+{% block nav %}
+  <span class="user">{{ email }}</span>
+  <form method="post" action="/logout" class="inline-form">
+    <button type="submit" class="link">Log out</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>“{{ lineage_label }}” — version history</h1>
+  <p class="muted">
+    Every version of this federation lineage. You can see inflows to all versions
+    (including ones you joined after), but you're only asked to sign for versions
+    you're a member of. Funds that arrive at a superseded version can be
+    <strong>relayed</strong> forward to the current version by that version's signers.
+  </p>
+</section>
+
+<section class="card">
+  <ul class="member-list">
+    {% for v in versions %}
+    <li>
+      <div>
+        <strong>v{{ v.version_index }}</strong>
+        {% if v.is_current %}<span class="badge">current</span>{% else %}<span class="muted">{{ v.status }}</span>{% endif %}
+        — {{ v.balance_btc }} BTC
+        {% if v.viewer_can_sign %}<span class="muted">· you can sign</span>{% else %}<span class="muted">· view-only</span>{% endif %}
+      </div>
+      <div class="actions">
+        <a class="link" href="/federations/{{ v.federation_id }}/receive">Receive / history</a>
+        {% if v.relay_available %}
+        <form method="post" action="/federations/{{ v.federation_id }}/relay" class="inline-form">
+          <input type="number" name="fee_rate" min="1" step="1" value="2" title="fee rate (sat/vB)">
+          <button type="submit" class="primary">Relay funds to current</button>
+        </form>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endblock %}

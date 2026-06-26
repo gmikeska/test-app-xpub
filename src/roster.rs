@@ -156,6 +156,38 @@ pub fn validate_threshold(m: i32, n: usize) -> Result<u32, RosterError> {
     u32::try_from(m).map_err(|_| RosterError::BadThreshold { m, n })
 }
 
+/// A historic version's relay-signing requirement: the members who can sign for
+/// it and its threshold.
+pub struct HistoricVersion {
+    /// The version's member user ids (immutable — relay needs `threshold` of these).
+    pub members: Vec<Uuid>,
+    /// The version's signing threshold.
+    pub threshold: u32,
+}
+
+/// Identify historic versions whose **relay** would be at risk after a roster
+/// change: fewer than `threshold` of their members remain in `next_current`
+/// (the active roster after the migration). Such a version's late-inflow relay
+/// would depend on people no longer in the active federation — worth warning the
+/// operator (design §8 relay-liveness). Returns indices into `historic`.
+///
+/// Advisory only: a removed member is still a member of the historic version and
+/// *can* sign its relay if they cooperate; this flags the versions where that
+/// cooperation becomes load-bearing.
+#[must_use]
+pub fn historic_versions_at_risk(historic: &[HistoricVersion], next_current: &[Uuid]) -> Vec<usize> {
+    let active: HashSet<Uuid> = next_current.iter().copied().collect();
+    historic
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let overlap = v.members.iter().filter(|m| active.contains(m)).count();
+            let need = usize::try_from(v.threshold).unwrap_or(usize::MAX);
+            (overlap < need).then_some(i)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +266,20 @@ mod tests {
         assert_eq!(validate_threshold(3, 3).unwrap(), 3);
         assert!(validate_threshold(0, 3).is_err());
         assert!(validate_threshold(4, 3).is_err());
+    }
+
+    #[test]
+    fn relay_liveness_flags_stranded_historic_versions() {
+        let m = ids(5);
+        // Historic v0 = 2-of-3 {m0, m1, m2}.
+        let historic = vec![HistoricVersion {
+            members: vec![m[0], m[1], m[2]],
+            threshold: 2,
+        }];
+
+        // Next current keeps only m0 from v0 → overlap 1 < 2 → at risk.
+        assert_eq!(historic_versions_at_risk(&historic, &[m[0], m[3], m[4]]), vec![0]);
+        // Next current keeps m0 + m1 → overlap 2 ≥ 2 → safe.
+        assert!(historic_versions_at_risk(&historic, &[m[0], m[1], m[3]]).is_empty());
     }
 }

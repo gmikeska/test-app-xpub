@@ -163,6 +163,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::migrations::cancel_post),
         )
         .route(
+            "/federations/{id}/lineage",
+            get(handlers::migrations::lineage_get),
+        )
+        .route(
+            "/federations/{id}/relay",
+            post(handlers::migrations::relay_post),
+        )
+        .route(
             "/federations/{id}/receive",
             get(handlers::federations::receive),
         )

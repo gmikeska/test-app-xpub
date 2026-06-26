@@ -141,22 +141,6 @@ pub async fn user_has_signer(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool>
     Ok(count > 0)
 }
 
-/// Fetch the user's primary (oldest) signer row. Used by signing flows that
-/// assume a single onboarded Trezor per user.
-///
-/// # Errors
-/// Propagates any underlying SQL error.
-pub async fn find_signer_for_user(pool: &PgPool, user_id: Uuid) -> sqlx::Result<Option<SignerRow>> {
-    sqlx::query_as::<_, SignerRow>(
-        "SELECT id, user_id, label, descriptor_key, xpub, fingerprint, \
-                derivation_path, device_type, network, created_at \
-         FROM signers WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-}
-
 /// Fetch the user's signer at a specific BIP-32 derivation path. Used by
 /// federation-creation flows that need the *P2WSH* signer specifically (a
 /// `m/48'/.../2'` xpub), not just "any" onboarded signer.
@@ -1264,6 +1248,39 @@ mod versioning {
         .await
     }
 
+    /// Persist a **relay** sweep (late inflows from a superseded version → the
+    /// current version) as a `kind = 'relay'` proposal. Unlike a migration it
+    /// carries **no** `migration_id` and triggers **no** version flip on
+    /// broadcast — it only moves funds forward. `federation_id` is the
+    /// superseded source version, so its members (including ones removed in
+    /// later versions) are the signers (requirement 6). Returns the proposal id.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn insert_relay_proposal(
+        pool: &PgPool,
+        federation_id: Uuid,
+        proposed_by: Uuid,
+        psbt_b64: &str,
+        proposal_json: &serde_json::Value,
+        coin_selection_json: &serde_json::Value,
+    ) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO transaction_proposals \
+                (federation_id, proposed_by, label, kind, \
+                 psbt_b64, proposal_json, coin_selection_json) \
+             VALUES ($1, $2, 'Relay to current federation', 'relay', $3, $4, $5) \
+             RETURNING id",
+        )
+        .bind(federation_id)
+        .bind(proposed_by)
+        .bind(psbt_b64)
+        .bind(proposal_json)
+        .bind(coin_selection_json)
+        .fetch_one(pool)
+        .await
+    }
+
     /// Version-flip inputs for a broadcast migration transaction.
     #[allow(clippy::struct_field_names)] // the fields are genuinely all ids
     pub struct MigrationEnactment {
@@ -1359,7 +1376,8 @@ mod tests {
         create_pending_migration, current_version_for_lineage, enact_version_transition,
         find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
         inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
-        insert_migration_proposal, lineages_visible_to_user, list_migration_changes,
+        insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
+        list_migration_changes,
         load_lineage_versions, migration_enactment_for_proposal, set_migration_status,
         set_migration_target_version,
     };
@@ -1774,6 +1792,21 @@ mod tests {
             inflight_migration_for_lineage(&pool, lineage)
                 .await?
                 .is_none()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn relay_proposal_does_not_trigger_version_enactment(pool: PgPool) -> sqlx::Result<()> {
+        let (lineage, ..) = open_migration(&pool).await?;
+        let proposer = mk_user(&pool, "relay@example.com").await?;
+        let relay =
+            insert_relay_proposal(&pool, lineage, proposer, "psbt-b64", &json!({}), &json!({}))
+                .await?;
+        // A relay is `kind='relay'`, not a migration → broadcast must not flip versions.
+        assert!(
+            migration_enactment_for_proposal(&pool, relay).await?.is_none(),
+            "a relay must never enact a version transition"
         );
         Ok(())
     }

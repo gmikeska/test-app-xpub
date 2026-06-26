@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use asterism_core::NetworkType;
 use asterism_xpub::ExternalSigner;
+use bitcoin::Amount;
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -283,6 +284,173 @@ pub async fn cancel_post(
     db::cancel_migration(&state.db, migration_id).await?;
     tracing::info!(%migration_id, by = %user.email, "federation migration cancelled");
     Ok(Redirect::to(&format!("/federations/{federation_id}")).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /federations/{id}/lineage  — version history + relay surface (req 6 & 7)
+// ---------------------------------------------------------------------------
+
+#[derive(Template, WebTemplate)]
+#[template(path = "lineage.html")]
+struct LineageTemplate {
+    email: String,
+    lineage_label: String,
+    versions: Vec<VersionView>,
+}
+
+struct VersionView {
+    federation_id: Uuid,
+    version_index: i32,
+    status: String,
+    is_current: bool,
+    balance_btc: String,
+    /// The viewer is a member of this version and can sign for it (req 6/7).
+    viewer_can_sign: bool,
+    /// Superseded version still holding funds → a relay can sweep them forward.
+    relay_available: bool,
+}
+
+/// `GET /federations/{id}/lineage`
+///
+/// Show every version of the lineage `{id}` belongs to — visible to **any**
+/// member of **any** version (lineage-wide visibility, req 7) — with per-version
+/// balances and a relay action on superseded versions still holding funds
+/// (req 6). Whether the viewer can *sign* a version is per-version (req 6/7).
+///
+/// # Errors
+/// - [`AppError::NotFound`] if the federation doesn't exist.
+/// - [`AppError::Forbidden`] if the viewer is a member of no version of the lineage.
+/// - Any underlying SQL/wallet error.
+pub async fn lineage_get(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path(federation_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let federation = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+    let lineage_id = federation.lineage_id;
+
+    // Visibility is lineage-wide: a member of *any* version sees them all (req 7).
+    if !db::lineages_visible_to_user(&state.db, user.id)
+        .await?
+        .contains(&lineage_id)
+    {
+        return Err(AppError::Forbidden);
+    }
+
+    // Freshen balances across all versions (sync fan-out). Best-effort: a node
+    // outage shouldn't hide the version history — render cached balances.
+    if let Err(e) = state.wallets.sync_lineage(lineage_id).await {
+        tracing::warn!(error = %e, %lineage_id, "lineage sync failed; rendering cached balances");
+    }
+
+    let versions = db::load_lineage_versions(&state.db, lineage_id).await?;
+    let current_id = db::current_version_for_lineage(&state.db, lineage_id)
+        .await?
+        .map(|f| f.id);
+
+    let mut version_views = Vec::with_capacity(versions.len());
+    for v in &versions {
+        let wallet = state.wallets.load_or_init(v.id).await?;
+        let balance = wallet.balance().await.total();
+        let viewer_can_sign = db::find_signer_for_user_in_version(&state.db, user.id, v.id)
+            .await?
+            .is_some();
+        let is_current = current_id == Some(v.id);
+        version_views.push(VersionView {
+            federation_id: v.id,
+            version_index: v.version_index,
+            status: v.status.clone(),
+            is_current,
+            balance_btc: format!("{:.8}", balance.to_btc()),
+            viewer_can_sign,
+            relay_available: !is_current && balance > Amount::ZERO,
+        });
+    }
+
+    Ok(LineageTemplate {
+        email: user.email,
+        lineage_label: federation.label,
+        versions: version_views,
+    }
+    .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /federations/{id}/relay  — sweep a superseded version forward (req 6)
+// ---------------------------------------------------------------------------
+
+/// Form for [`relay_post`].
+#[derive(Debug, Deserialize)]
+pub struct RelayForm {
+    /// Fee rate (sat/vB) for the relay sweep.
+    pub fee_rate: u64,
+}
+
+/// `POST /federations/{id}/relay`
+///
+/// Sweep late inflows held by a **superseded** version `{id}` forward to the
+/// lineage's current version. Persisted as a `kind='relay'` proposal on `{id}`,
+/// so **that version's** members — including ones removed in later versions —
+/// are the signers (requirement 6). Broadcasting it moves funds only; it does
+/// **not** change versions.
+///
+/// # Errors
+/// - [`AppError::NotFound`] / [`AppError::BadRequest`] (not a superseded version,
+///   or the lineage has no current version).
+/// - [`AppError::Forbidden`] if the viewer isn't a member of `{id}`.
+/// - [`AppError::Wallet`] if the sweep can't be built (e.g. no spendable funds).
+pub async fn relay_post(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path(federation_id): Path<Uuid>,
+    Form(body): Form<RelayForm>,
+) -> Result<Response, AppError> {
+    let source = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+    if source.status == "active" {
+        return Err(AppError::BadRequest(
+            "Relay applies to a superseded version; use Send on the current version.".to_owned(),
+        ));
+    }
+    ensure_member(&state, federation_id, user.id).await?;
+
+    let current = db::current_version_for_lineage(&state.db, source.lineage_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("lineage has no current version".to_owned()))?;
+    let destination = state
+        .wallets
+        .load_or_init(current.id)
+        .await?
+        .reveal_first_external()
+        .await?;
+
+    // Drain the historic version's funds to the current version (treasury-pays).
+    let built = state
+        .wallets
+        .load_or_init(federation_id)
+        .await?
+        .build_migration_tx(&destination, body.fee_rate)
+        .await?;
+
+    let proposal_id = db::insert_relay_proposal(
+        &state.db,
+        federation_id,
+        user.id,
+        &built.psbt_b64,
+        &built.proposal_json,
+        &built.coin_selection_json,
+    )
+    .await?;
+
+    tracing::info!(
+        source = %federation_id, target = %current.id, %proposal_id,
+        by = %user.email, "relay sweep proposed (superseded → current)"
+    );
+
+    Ok(Redirect::to(&format!("/federations/{federation_id}/proposals/{proposal_id}")).into_response())
 }
 
 // ---------------------------------------------------------------------------
