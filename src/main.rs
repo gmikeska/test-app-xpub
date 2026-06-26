@@ -15,8 +15,6 @@ mod db;
 mod error;
 mod federation_build;
 mod handlers;
-mod lineage;
-mod migration;
 mod models;
 mod roster;
 mod wallet;
