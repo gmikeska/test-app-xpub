@@ -1378,8 +1378,7 @@ mod tests {
         inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
         insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
         list_federations_for_user, list_migration_changes, load_lineage_versions,
-        migration_enactment_for_proposal,
-        set_migration_status, set_migration_target_version,
+        migration_enactment_for_proposal, set_migration_status, set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1853,14 +1852,19 @@ mod tests {
             "the invited user sees the pending version"
         );
         // Pre-enactment bob cannot sign the current (v0) version — not a member of it.
-        assert!(find_signer_for_user_in_version(&pool, bob, lineage)
-            .await?
-            .is_none());
+        assert!(
+            find_signer_for_user_in_version(&pool, bob, lineage)
+                .await?
+                .is_none()
+        );
 
         // Enact: the pending version becomes current; bob is now a current signer.
         enact_version_transition(&pool, pending, lineage, migration).await?;
         assert_eq!(
-            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            current_version_for_lineage(&pool, lineage)
+                .await?
+                .unwrap()
+                .id,
             pending
         );
         assert!(
