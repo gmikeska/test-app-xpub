@@ -100,6 +100,10 @@
      href="/federations/{{ federation.id }}/receive">Receive</a>
   <a class="tab {% if active_tab == "send" %}active{% endif %}"
      href="/federations/{{ federation.id }}/send">Send</a>
+  <a class="tab {% if active_tab == "versions" %}active{% endif %}"
+     href="/federations/{{ federation.id }}/lineage">Versions</a>
+  <a class="tab {% if active_tab == "migrate" %}active{% endif %}"
+     href="/federations/{{ federation.id }}/migrate">Migrate</a>
 </nav>
 
 {% block tab_body %}{% endblock %}

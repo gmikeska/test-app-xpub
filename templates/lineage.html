@@ -32,6 +32,9 @@
       </div>
       <div class="actions">
         <a class="link" href="/federations/{{ v.federation_id }}/receive">Receive / history</a>
+        {% if v.is_current && v.viewer_can_sign %}
+        <a class="link" href="/federations/{{ v.federation_id }}/migrate">Start a migration</a>
+        {% endif %}
         {% if v.relay_available %}
         <form method="post" action="/federations/{{ v.federation_id }}/relay" class="inline-form">
           <input type="number" name="fee_rate" min="1" step="1" value="2" title="fee rate (sat/vB)">
