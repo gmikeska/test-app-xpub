@@ -1246,11 +1246,11 @@ mod tests {
     #![allow(clippy::similar_names)]
 
     use super::{
-        create_pending_migration, current_version_for_lineage, enact_version_transition,
-        find_federation_by_id, find_migration_by_id, find_signer_for_user_in_version,
-        insert_federation_with_members, insert_migration, lineages_visible_to_user,
-        list_migration_changes, load_lineage_versions, set_migration_status,
-        set_migration_target_version, NewFederation, NewMigration, NewPendingMigration,
+        NewFederation, NewMigration, NewPendingMigration, create_pending_migration,
+        current_version_for_lineage, enact_version_transition, find_federation_by_id,
+        find_migration_by_id, find_signer_for_user_in_version, insert_federation_with_members,
+        insert_migration, lineages_visible_to_user, list_migration_changes, load_lineage_versions,
+        set_migration_status, set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;
@@ -1528,22 +1528,31 @@ mod tests {
         let (migration, pending) = create_pending_migration(&pool, &spec).await?;
 
         // Pending successor version: v1, pending, predecessor = v0, two members.
-        let pending_row = find_federation_by_id(&pool, pending).await?.expect("pending row");
+        let pending_row = find_federation_by_id(&pool, pending)
+            .await?
+            .expect("pending row");
         assert_eq!(pending_row.version_index, 1);
         assert_eq!(pending_row.status, "pending");
         assert_eq!(pending_row.predecessor_id, Some(lineage));
         assert_eq!(pending_row.lineage_id, lineage);
 
         // The base version is untouched — still the active current one (no funds moved).
-        let base = find_federation_by_id(&pool, lineage).await?.expect("base row");
+        let base = find_federation_by_id(&pool, lineage)
+            .await?
+            .expect("base row");
         assert_eq!(base.status, "active");
         assert_eq!(
-            current_version_for_lineage(&pool, lineage).await?.unwrap().id,
+            current_version_for_lineage(&pool, lineage)
+                .await?
+                .unwrap()
+                .id,
             lineage
         );
 
         // Migration is proposed and linked to the pending version.
-        let mig = find_migration_by_id(&pool, migration).await?.expect("migration");
+        let mig = find_migration_by_id(&pool, migration)
+            .await?
+            .expect("migration");
         assert_eq!(mig.status, "proposed");
         assert_eq!(mig.target_version_id, Some(pending));
         assert_eq!(list_migration_changes(&pool, migration).await?.len(), 3);

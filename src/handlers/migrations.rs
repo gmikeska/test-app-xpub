@@ -26,13 +26,13 @@ use uuid::Uuid;
 use asterism_core::NetworkType;
 use asterism_xpub::ExternalSigner;
 
+use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db::{self, NewPendingMigration};
 use crate::error::AppError;
 use crate::federation_build::build_federation;
 use crate::handlers::new_federation::{parse_device_type, resolve_member_signers};
-use crate::roster::{compute_roster_plan, validate_threshold, RosterAction};
-use crate::AppState;
+use crate::roster::{RosterAction, compute_roster_plan, validate_threshold};
 
 // ---------------------------------------------------------------------------
 // GET /federations/{id}/migrate
@@ -159,9 +159,12 @@ pub async fn migrate_post(
         .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
 
     // Resolve the next version's signers and build its descriptor/snapshot.
-    let resolved =
-        resolve_member_signers(&state.db, &plan.next_members, &state.config.federation_derivation_path)
-            .await?;
+    let resolved = resolve_member_signers(
+        &state.db,
+        &plan.next_members,
+        &state.config.federation_derivation_path,
+    )
+    .await?;
     let next_signer: HashMap<Uuid, Uuid> =
         resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
 
@@ -182,8 +185,12 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    let built = build_federation(signers, threshold, NetworkType::Bitcoin(state.config.network))
-        .map_err(AppError::BadFederationInput)?;
+    let built = build_federation(
+        signers,
+        threshold,
+        NetworkType::Bitcoin(state.config.network),
+    )
+    .map_err(AppError::BadFederationInput)?;
 
     // Persist: migration record + pending successor version (no funds touched).
     let next_members: Vec<(Uuid, Uuid)> =

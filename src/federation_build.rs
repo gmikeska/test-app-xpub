@@ -7,7 +7,7 @@
 //! diverge in how they build the descriptor — which is what makes a migration's
 //! pending version a faithful successor (Gate G3).
 
-use asterism_core::descriptor::{to_multipath_string, KeyMode};
+use asterism_core::descriptor::{KeyMode, to_multipath_string};
 use asterism_core::{DescriptorBuilder, Federation, FederationSnapshot, NetworkType};
 use asterism_xpub::ExternalSigner;
 
@@ -57,9 +57,9 @@ pub fn build_federation(
 mod tests {
     use super::*;
     use asterism_xpub::DeviceType;
+    use bitcoin::Network;
     use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
     use bitcoin::secp256k1::Secp256k1;
-    use bitcoin::Network;
 
     fn signer(seed: u8) -> ExternalSigner {
         let secp = Secp256k1::new();
