@@ -1429,12 +1429,12 @@ mod tests {
         NewFederation, NewMigration, NewPendingMigration, cancel_migration,
         create_pending_migration, current_version_for_lineage, enact_version_transition,
         entitled_versions_for_user, find_federation_by_id, find_migration_by_id,
-        find_signer_for_user_in_version,
-        inflight_migration_for_lineage, insert_federation_with_members, insert_migration,
-        insert_migration_proposal, insert_relay_proposal, lineages_visible_to_user,
-        list_federations_for_user, list_migration_changes, load_lineage_versions,
-        migration_enactment_for_proposal, most_recent_entitled_versions_for_user,
-        set_federation_status, set_migration_status, set_migration_target_version,
+        find_signer_for_user_in_version, inflight_migration_for_lineage,
+        insert_federation_with_members, insert_migration, insert_migration_proposal,
+        insert_relay_proposal, lineages_visible_to_user, list_federations_for_user,
+        list_migration_changes, load_lineage_versions, migration_enactment_for_proposal,
+        most_recent_entitled_versions_for_user, set_federation_status, set_migration_status,
+        set_migration_target_version,
     };
     use serde_json::json;
     use sqlx::PgPool;

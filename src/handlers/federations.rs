@@ -211,7 +211,8 @@ pub async fn receive(
     // Show addresses for every version the viewer is entitled to (newest first),
     // as tabs; default to the version they navigated to (`federation_id`). The
     // header card (balance / descriptor / cosigners) reflects that version.
-    let entitled = db::entitled_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
+    let entitled =
+        db::entitled_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
 
     let mut federation_groups = Vec::with_capacity(entitled.len());
     let mut header_tip = federation.tip_height;
