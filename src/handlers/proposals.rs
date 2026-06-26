@@ -252,7 +252,8 @@ pub async fn detail(
     let viewer_already_signed = signed_by_user.contains_key(&user.id);
     let viewer_already_rejected = rejected_by_user.contains_key(&user.id);
 
-    let viewer_signer_row = db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
+    let viewer_signer_row =
+        db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
     let viewer_has_signer = viewer_signer_row.is_some();
 
     let detail_view = ProposalDetailView {

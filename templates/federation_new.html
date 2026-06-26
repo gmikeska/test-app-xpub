@@ -39,12 +39,15 @@
 
       <ul class="member-list">
         {% for c in candidates %}
-          <li class="member-row{% if c.is_creator %} member-row-self{% endif %}">
+          <li class="member-row{% if c.is_creator %} member-row-self{% else if !c.has_p2wsh_signer %} member-row-disabled{% endif %}">
             <label class="member-label">
               {% if c.is_creator %}
                 <input type="checkbox" checked disabled>
-              {% else %}
+              {% else if c.has_p2wsh_signer %}
                 <input type="checkbox" name="member_ids" value="{{ c.id }}">
+              {% else %}
+                <input type="checkbox" disabled
+                       title="No hardware wallet onboarded — this user can't be a cosigner yet">
               {% endif %}
               <span class="member-email">{{ c.email }}</span>
               {% if c.is_creator %}
@@ -75,6 +78,9 @@
   .member-row { padding: 8px 10px; border-radius: 6px; }
   .member-row:hover { background: var(--panel-2); }
   .member-row-self { background: var(--panel-2); }
+  .member-row-disabled { opacity: 0.5; }
+  .member-row-disabled .member-label { cursor: not-allowed; }
+  .member-row-disabled:hover { background: none; }
   .member-label { display: flex; align-items: center; gap: 10px; cursor: pointer; }
   .member-row-self .member-label { cursor: default; }
   .member-email { font-weight: 500; }

@@ -175,7 +175,10 @@ pub struct HistoricVersion {
 /// *can* sign its relay if they cooperate; this flags the versions where that
 /// cooperation becomes load-bearing.
 #[must_use]
-pub fn historic_versions_at_risk(historic: &[HistoricVersion], next_current: &[Uuid]) -> Vec<usize> {
+pub fn historic_versions_at_risk(
+    historic: &[HistoricVersion],
+    next_current: &[Uuid],
+) -> Vec<usize> {
     let active: HashSet<Uuid> = next_current.iter().copied().collect();
     historic
         .iter()
@@ -278,7 +281,10 @@ mod tests {
         }];
 
         // Next current keeps only m0 from v0 → overlap 1 < 2 → at risk.
-        assert_eq!(historic_versions_at_risk(&historic, &[m[0], m[3], m[4]]), vec![0]);
+        assert_eq!(
+            historic_versions_at_risk(&historic, &[m[0], m[3], m[4]]),
+            vec![0]
+        );
         // Next current keeps m0 + m1 → overlap 2 ≥ 2 → safe.
         assert!(historic_versions_at_risk(&historic, &[m[0], m[1], m[3]]).is_empty());
     }

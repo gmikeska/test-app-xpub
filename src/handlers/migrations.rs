@@ -450,7 +450,10 @@ pub async fn relay_post(
         by = %user.email, "relay sweep proposed (superseded → current)"
     );
 
-    Ok(Redirect::to(&format!("/federations/{federation_id}/proposals/{proposal_id}")).into_response())
+    Ok(Redirect::to(&format!(
+        "/federations/{federation_id}/proposals/{proposal_id}"
+    ))
+    .into_response())
 }
 
 // ---------------------------------------------------------------------------

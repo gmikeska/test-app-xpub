@@ -6,7 +6,7 @@
 //! 2. Connect to `PostgreSQL`.
 //! 3. Run `migrations/*.sql` (domain schema).
 //! 4. Initialise `tower-sessions` Postgres store + run its own schema migration.
-//! 5. Seed the three test users (idempotent).
+//! 5. Seed the four test users (idempotent).
 //! 6. Build the router and serve on `APP_HOST:APP_PORT`.
 
 mod auth;
