@@ -597,19 +597,23 @@ pub async fn sum_inflight_inputs_for_federation(
     Ok(u64::try_from(sats).unwrap_or(0))
 }
 
-/// All proposals for a federation, newest first.
+/// All proposals across a set of federation versions, newest first.
+///
+/// Used by the Send tab to aggregate proposals over every version the viewer
+/// may see (a current signer → the whole lineage; an old-only signer → just
+/// their versions). Mirrors [`visible_versions_for_user`]'s visibility split.
 ///
 /// # Errors
 /// Propagates any underlying SQL error.
-pub async fn list_proposals_for_federation(
+pub async fn list_proposals_for_federations(
     pool: &PgPool,
-    federation_id: Uuid,
+    federation_ids: &[Uuid],
 ) -> sqlx::Result<Vec<ProposalRow>> {
     sqlx::query_as::<_, ProposalRow>(&format!(
         "SELECT {PROPOSAL_COLUMNS} FROM transaction_proposals \
-         WHERE federation_id = $1 ORDER BY created_at DESC",
+         WHERE federation_id = ANY($1) ORDER BY created_at DESC",
     ))
-    .bind(federation_id)
+    .bind(federation_ids)
     .fetch_all(pool)
     .await
 }
@@ -1463,8 +1467,9 @@ mod tests {
         entitled_versions_for_user, find_federation_by_id, find_migration_by_id,
         find_signer_for_user_in_version, inflight_migration_for_lineage,
         insert_federation_with_members, insert_migration, insert_migration_proposal,
-        insert_relay_proposal, lineages_visible_to_user, list_federations_for_user,
-        list_migration_changes, load_lineage_versions, migration_enactment_for_proposal,
+        insert_proposal, insert_relay_proposal, lineages_visible_to_user,
+        list_federations_for_user, list_migration_changes, list_proposals_for_federations,
+        load_lineage_versions, migration_enactment_for_proposal,
         most_recent_entitled_versions_for_user, set_federation_status, set_migration_status,
         set_migration_target_version, visible_versions_for_user,
     };
@@ -1992,6 +1997,59 @@ mod tests {
         assert_eq!(carol_v, vec![lineage, v1]);
         // old-only signer (bob) → only the version he's a member of, not its successor.
         assert_eq!(bob_v, vec![lineage]);
+        Ok(())
+    }
+
+    #[sqlx::test]
+    async fn proposals_aggregate_across_visible_versions(pool: PgPool) -> sqlx::Result<()> {
+        // v0 = {alice, bob}; migrate → v1 = {alice, carol}. One proposal on each.
+        let alice = mk_user(&pool, "alice@example.com").await?;
+        let alice_signer = mk_signer(&pool, alice, "fpa").await?;
+        let bob = mk_user(&pool, "bob@example.com").await?;
+        let bob_signer = mk_signer(&pool, bob, "fpb").await?;
+        let carol = mk_user(&pool, "carol@example.com").await?;
+        let carol_signer = mk_signer(&pool, carol, "fpc").await?;
+
+        let lineage = mk_v0(&pool, alice, alice_signer, "Treasury").await?;
+        mk_member(&pool, lineage, bob, Some(bob_signer)).await?;
+        set_federation_status(&pool, lineage, "superseded").await?;
+        let v1 = mk_version(&pool, lineage, 1, "active", Some(lineage)).await?;
+        mk_member(&pool, v1, alice, Some(alice_signer)).await?;
+        mk_member(&pool, v1, carol, Some(carol_signer)).await?;
+
+        let snap = json!({});
+        let p_v0 = insert_proposal(&pool, lineage, alice, Some("on v0"), "psbt0", &snap, &snap)
+            .await?
+            .id;
+        let p_v1 = insert_proposal(&pool, v1, alice, Some("on v1"), "psbt1", &snap, &snap)
+            .await?
+            .id;
+
+        // A current signer (alice) sees both versions' proposals, newest first.
+        let alice_visible = visible_versions_for_user(&pool, lineage, alice)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>();
+        let alice_props: Vec<Uuid> = list_proposals_for_federations(&pool, &alice_visible)
+            .await?
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(alice_props, vec![p_v1, p_v0]);
+
+        // An old-only signer (bob) sees only their version's proposal.
+        let bob_visible = visible_versions_for_user(&pool, lineage, bob)
+            .await?
+            .into_iter()
+            .map(|f| f.id)
+            .collect::<Vec<_>>();
+        let bob_props: Vec<Uuid> = list_proposals_for_federations(&pool, &bob_visible)
+            .await?
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(bob_props, vec![p_v0]);
         Ok(())
     }
 

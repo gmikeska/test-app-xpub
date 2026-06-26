@@ -12,7 +12,7 @@
     {% for v in versions %}
     <li>
       <div>
-        <strong>v{{ v.version_index }}</strong>
+        <strong>v{{ v.version_index + 1 }}</strong>
         {% if v.is_current %}<span class="badge">current</span>{% else %}<span class="muted">{{ v.status }}</span>{% endif %}
         — {{ v.balance_btc }} BTC
         {% if v.viewer_can_sign %}<span class="muted">· you can sign</span>{% else %}<span class="muted">· view-only</span>{% endif %}

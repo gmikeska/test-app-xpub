@@ -27,8 +27,11 @@
   <div class="crumbs">
     <a href="/home">← Your federations</a>
     <span class="sep">/</span>
-    <a href="/federations/{{ federation.id }}/send">{{ federation.label }}</a>
+    <a href="{{ back_href }}">{{ federation.label }}</a>
   </div>
+  {% if !viewer_is_member %}
+    <p class="muted">You're viewing this proposal from a federation version you don't sign on — it's read-only for you.</p>
+  {% endif %}
   <h1>
     {{ proposal.label }}
     <span class="status-badge {{ proposal.status_class }}">{{ proposal.status }}</span>
@@ -120,7 +123,7 @@
         </button>
       {% endif %}
 
-      {% if !viewer_already_rejected %}
+      {% if viewer_is_member && !viewer_already_rejected %}
         <form method="post" action="/federations/{{ federation.id }}/proposals/{{ proposal.id }}/rejections" class="inline-form">
           <input type="text" name="reason" placeholder="Reason (optional)" maxlength="240">
           <button type="submit" class="link danger">Reject (advisory)</button>
@@ -128,7 +131,7 @@
       {% endif %}
     {% endif %}
 
-    {% if proposal.status == "finalized" %}
+    {% if viewer_is_member && proposal.status == "finalized" %}
       <form method="post" action="/federations/{{ federation.id }}/proposals/{{ proposal.id }}/broadcast" class="inline-form">
         <button type="submit" class="primary">Broadcast</button>
       </form>

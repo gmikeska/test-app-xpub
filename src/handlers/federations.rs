@@ -27,7 +27,7 @@ use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::AppError;
-use crate::models::{ProposalRow, SignerRow};
+use crate::models::{FederationRow, ProposalRow, SignerRow};
 use crate::wallet::{REVEAL_COUNT, RevealedAddress};
 
 // ---------------------------------------------------------------------------
@@ -133,12 +133,21 @@ impl BalanceView {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProposalView {
     pub id: Uuid,
+    /// The proposal's own federation **version** id — used for the detail link
+    /// (the list aggregates across versions, so this is not the page's id).
+    pub federation_id: Uuid,
     pub label: String,
     pub status: String,
     pub recipient: String,
     pub amount_btc: String,
     pub fee_btc: String,
     pub created_at: String,
+    /// Label of the version this proposal belongs to, e.g. `"v1 (current)"`.
+    pub version_label: String,
+    /// `true` if the viewer is eligible to sign this proposal (a member of its
+    /// version with a Trezor onboarded). A current signer sees every version's
+    /// proposals but may only act on the ones this is `true` for.
+    pub viewer_can_sign: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,8 +290,37 @@ pub async fn send(
         ..federation
     };
 
-    let proposal_rows = db::list_proposals_for_federation(&state.db, federation_id).await?;
-    let proposals: Vec<ProposalView> = proposal_rows.into_iter().map(ProposalView::from).collect();
+    // Proposals are lineage-scoped by the same visibility split as the address
+    // tabs: a current signer sees every version's proposals; an old-only signer
+    // sees only their versions'. Each row links to its own version and is tagged
+    // with whether the viewer may actually sign it.
+    let visible = db::visible_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
+    let mut version_meta: std::collections::HashMap<Uuid, (String, bool)> =
+        std::collections::HashMap::with_capacity(visible.len());
+    let mut version_ids: Vec<Uuid> = Vec::with_capacity(visible.len());
+    for v in &visible {
+        let label = if v.status == "active" {
+            format!("v{} (current)", v.version_index + 1)
+        } else {
+            format!("v{}", v.version_index + 1)
+        };
+        let can_sign = db::find_signer_for_user_in_version(&state.db, user.id, v.id)
+            .await?
+            .is_some();
+        version_meta.insert(v.id, (label, can_sign));
+        version_ids.push(v.id);
+    }
+    let proposal_rows = db::list_proposals_for_federations(&state.db, &version_ids).await?;
+    let proposals: Vec<ProposalView> = proposal_rows
+        .into_iter()
+        .map(|r| {
+            let (version_label, viewer_can_sign) = version_meta
+                .get(&r.federation_id)
+                .cloned()
+                .unwrap_or_else(|| ("—".to_string(), false));
+            ProposalView::build(r, version_label, viewer_can_sign)
+        })
+        .collect();
 
     // Old signers (members of a previous version, not the current one) may only
     // send to the current federation: pre-fill + lock the recipient. Current
@@ -336,7 +374,19 @@ pub async fn load_header(
         return Err(AppError::Forbidden);
     }
 
-    let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
+    build_header_views(state, row, user_id).await
+}
+
+/// Build the shared header view-models (federation card + cosigner roster) from
+/// an already-loaded row, **without** a membership gate. Callers that allow a
+/// broader (view-only) audience — e.g. a current signer of the lineage viewing a
+/// historic version's proposal — do their own access check first.
+pub(crate) async fn build_header_views(
+    state: &Arc<AppState>,
+    row: FederationRow,
+    user_id: Uuid,
+) -> Result<(FederationView, Vec<CosignerView>), AppError> {
+    let members = db::list_federation_members_with_signers(&state.db, row.id).await?;
     let cosigners = members
         .into_iter()
         .map(|(u, s)| build_cosigner_view(&u.email, s, user_id == u.id))
@@ -429,8 +479,10 @@ impl From<RevealedAddress> for AddressView {
     }
 }
 
-impl From<ProposalRow> for ProposalView {
-    fn from(r: ProposalRow) -> Self {
+impl ProposalView {
+    /// Build a row from a proposal plus the resolved version context (which
+    /// version it belongs to and whether the viewer may sign it).
+    fn build(r: ProposalRow, version_label: String, viewer_can_sign: bool) -> Self {
         let recipient = r
             .proposal_json
             .get("recipient")
@@ -448,12 +500,15 @@ impl From<ProposalRow> for ProposalView {
             .unwrap_or(0);
         Self {
             id: r.id,
+            federation_id: r.federation_id,
             label: r.label.unwrap_or_else(|| "(no label)".to_string()),
             status: r.status,
             recipient,
             amount_btc: format_btc_sats(amount_sats),
             fee_btc: format_btc_sats(fee_sats),
             created_at: format_timestamp(r.created_at),
+            version_label,
+            viewer_can_sign,
         }
     }
 }

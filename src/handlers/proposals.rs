@@ -30,7 +30,7 @@ use crate::auth::AuthUser;
 use crate::db;
 use crate::error::AppError;
 use crate::handlers::federations::{
-    FederationView, format_btc_sats, format_timestamp, load_header, truncate_middle,
+    FederationView, format_btc_sats, format_timestamp, truncate_middle,
 };
 use crate::models::{ProposalRow, SignerRow};
 use crate::wallet::TrezorSignRequest;
@@ -162,6 +162,15 @@ struct ProposalTemplate {
     /// `true` if the viewer is a federation member with a Trezor row of
     /// their own (i.e. they can sign).
     viewer_has_signer: bool,
+    /// `true` if the viewer is a member of this proposal's federation version.
+    /// A current signer of the lineage who is *not* a member may view the
+    /// proposal read-only, so member-only actions (reject, broadcast) are gated
+    /// on this rather than on mere visibility.
+    viewer_is_member: bool,
+    /// Where the breadcrumb "back" link points. For a member it's this version's
+    /// Send tab; for a view-only current signer it's the version they can act on
+    /// (the current one), since the historic version's Send tab is member-gated.
+    back_href: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,58 +239,39 @@ pub async fn detail(
     AuthUser(user): AuthUser,
     Path((federation_id, proposal_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let (federation, _cosigners) = load_header(&state, federation_id, user.id).await?;
+    let row = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+
+    // View access: a member of this version, OR a current signer of the lineage
+    // (who may view a historic version's proposal read-only — mirrors the
+    // version-visibility rule for addresses and the Send-tab proposals list).
+    let viewer_is_member =
+        db::user_is_federation_member(&state.db, federation_id, user.id).await?;
+    let status =
+        crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
+            .await?;
+    if !viewer_is_member && !status.is_current_signer {
+        return Err(AppError::Forbidden);
+    }
+
+    let back_href = if viewer_is_member {
+        format!("/federations/{federation_id}/send")
+    } else if let Some(current_id) = status.current_version_id {
+        format!("/federations/{current_id}/send")
+    } else {
+        "/home".to_string()
+    };
+
+    let (federation, _cosigners) =
+        crate::handlers::federations::build_header_views(&state, row, user.id).await?;
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     let proposer = db::find_user_by_id(&state.db, proposal.proposed_by)
         .await?
         .map_or_else(|| "—".to_string(), |u| u.email);
 
-    let signatures = db::list_signatures_for_proposal(&state.db, proposal_id).await?;
-    let rejections = db::list_rejections_for_proposal(&state.db, proposal_id).await?;
-
-    let signed_by_user: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = signatures
-        .iter()
-        .map(|s| (s.user_id, s.signed_at))
-        .collect();
-    let rejected_by_user: HashMap<Uuid, (Option<String>, chrono::DateTime<chrono::Utc>)> =
-        rejections
-            .iter()
-            .map(|r| (r.user_id, (r.reason.clone(), r.rejected_at)))
-            .collect();
-
-    let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
-    let cosigner_statuses: Vec<CosignerStatusView> = members
-        .iter()
-        .map(|(u, s)| {
-            let (state_label, when) = signed_by_user.get(&u.id).map_or_else(
-                || {
-                    rejected_by_user.get(&u.id).map_or_else(
-                        || ("pending".to_string(), None),
-                        |(_, ts)| ("rejected".to_string(), Some(format_timestamp(*ts))),
-                    )
-                },
-                |ts| ("signed".to_string(), Some(format_timestamp(*ts))),
-            );
-            let reason = rejected_by_user.get(&u.id).and_then(|(r, _)| r.clone());
-            CosignerStatusView {
-                email: u.email.clone(),
-                label: s
-                    .as_ref()
-                    .and_then(|sr| sr.label.clone())
-                    .unwrap_or_else(|| "Trezor".to_string()),
-                fingerprint: s
-                    .as_ref()
-                    .map_or_else(|| "—".to_string(), |sr| sr.fingerprint.clone()),
-                state: state_label,
-                when,
-                reason,
-                is_self: u.id == user.id,
-            }
-        })
-        .collect();
-
-    let viewer_already_signed = signed_by_user.contains_key(&user.id);
-    let viewer_already_rejected = rejected_by_user.contains_key(&user.id);
+    let (cosigner_statuses, viewer_already_signed, viewer_already_rejected) =
+        load_cosigner_statuses(&state, federation_id, proposal_id, user.id).await?;
 
     let viewer_signer_row =
         db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
@@ -325,6 +315,8 @@ pub async fn detail(
         viewer_already_signed,
         viewer_already_rejected,
         viewer_has_signer,
+        viewer_is_member,
+        back_href,
     }
     .into_response())
 }
@@ -633,6 +625,64 @@ pub async fn broadcast(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build the cosigner status rows for a proposal, plus the viewer's own
+/// `(already_signed, already_rejected)` flags. Factored out of `detail` to keep
+/// that handler within size limits.
+async fn load_cosigner_statuses(
+    state: &Arc<AppState>,
+    federation_id: Uuid,
+    proposal_id: Uuid,
+    viewer_id: Uuid,
+) -> Result<(Vec<CosignerStatusView>, bool, bool), AppError> {
+    let signatures = db::list_signatures_for_proposal(&state.db, proposal_id).await?;
+    let rejections = db::list_rejections_for_proposal(&state.db, proposal_id).await?;
+
+    let signed_by_user: HashMap<Uuid, chrono::DateTime<chrono::Utc>> = signatures
+        .iter()
+        .map(|s| (s.user_id, s.signed_at))
+        .collect();
+    let rejected_by_user: HashMap<Uuid, (Option<String>, chrono::DateTime<chrono::Utc>)> =
+        rejections
+            .iter()
+            .map(|r| (r.user_id, (r.reason.clone(), r.rejected_at)))
+            .collect();
+
+    let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
+    let cosigner_statuses: Vec<CosignerStatusView> = members
+        .iter()
+        .map(|(u, s)| {
+            let (state_label, when) = signed_by_user.get(&u.id).map_or_else(
+                || {
+                    rejected_by_user.get(&u.id).map_or_else(
+                        || ("pending".to_string(), None),
+                        |(_, ts)| ("rejected".to_string(), Some(format_timestamp(*ts))),
+                    )
+                },
+                |ts| ("signed".to_string(), Some(format_timestamp(*ts))),
+            );
+            let reason = rejected_by_user.get(&u.id).and_then(|(r, _)| r.clone());
+            CosignerStatusView {
+                email: u.email.clone(),
+                label: s
+                    .as_ref()
+                    .and_then(|sr| sr.label.clone())
+                    .unwrap_or_else(|| "Trezor".to_string()),
+                fingerprint: s
+                    .as_ref()
+                    .map_or_else(|| "—".to_string(), |sr| sr.fingerprint.clone()),
+                state: state_label,
+                when,
+                reason,
+                is_self: u.id == viewer_id,
+            }
+        })
+        .collect();
+
+    let viewer_already_signed = signed_by_user.contains_key(&viewer_id);
+    let viewer_already_rejected = rejected_by_user.contains_key(&viewer_id);
+    Ok((cosigner_statuses, viewer_already_signed, viewer_already_rejected))
+}
 
 async fn load_proposal_for_federation(
     state: &Arc<AppState>,

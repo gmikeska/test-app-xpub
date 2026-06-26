@@ -48,6 +48,7 @@
       <thead>
         <tr>
           <th>Label</th>
+          <th>Version</th>
           <th>Recipient</th>
           <th>Amount</th>
           <th>Fee</th>
@@ -59,7 +60,11 @@
         {% for p in proposals %}
           <tr>
             <td>
-              <a href="/federations/{{ federation.id }}/proposals/{{ p.id }}">{{ p.label }}</a>
+              <a href="/federations/{{ p.federation_id }}/proposals/{{ p.id }}">{{ p.label }}</a>
+            </td>
+            <td>
+              {{ p.version_label }}
+              {% if !p.viewer_can_sign %}<span class="muted">· view-only</span>{% endif %}
             </td>
             <td><code class="break">{{ p.recipient }}</code></td>
             <td>{{ p.amount_btc }}</td>
