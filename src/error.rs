@@ -9,7 +9,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use asterism_core::DescriptorError;
+use asterism::core::DescriptorError;
 
 use crate::wallet::WalletError;
 
@@ -63,7 +63,7 @@ pub enum AppError {
         emails: Vec<String>,
     },
 
-    /// `asterism-core`'s [`DescriptorBuilder`](asterism_core::DescriptorBuilder)
+    /// `asterism-core`'s [`DescriptorBuilder`](asterism::core::DescriptorBuilder)
     /// rejected the assembled inputs — duplicate keys, network mismatch, etc.
     #[error("descriptor builder rejected federation: {0}")]
     DescriptorBuilderRejected(#[from] DescriptorError),

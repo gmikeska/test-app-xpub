@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS users_email_idx ON users (lower(email));
 -- ----------------------------------------------------------------------------
 --
 -- Captured from the user's hardware wallet via the browser. Each row mirrors
--- the inputs to `asterism_xpub::ExternalSigner::from_descriptor_key(...)`:
+-- the inputs to `asterism::xpub::ExternalSigner::from_descriptor_key(...)`:
 -- the literal descriptor-key string the device exported, plus the parsed
 -- (fingerprint, derivation_path, xpub) triple so the homepage can render
 -- them without re-parsing.

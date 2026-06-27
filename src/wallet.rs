@@ -3,8 +3,8 @@
 //! Each federation gets one `bdk_wallet::Wallet` that lives in-process behind
 //! a `tokio::sync::Mutex`. State is persisted as a JSON-encoded
 //! `bdk_wallet::ChangeSet` on the `federations.bdk_changeset` column, and
-//! chain data is sourced from the local Bitcoin Core node via the
-//! `bdk_bitcoind_rpc::Emitter`.
+//! chain data is sourced from the local Bitcoin Core node via
+//! [`asterism::core::chain_sync::emitter_sync`].
 //!
 //! # Concurrency model
 //!
@@ -29,7 +29,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
+use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use asterism::core::error::PsbtError;
+use asterism::core::psbt as core_psbt;
 use bdk_wallet::chain::{ChainPosition, Merge};
 use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
 use bitcoin::address::NetworkUnchecked;
@@ -183,9 +185,11 @@ pub enum WalletError {
     #[error("failed to merge partial PSBT into base: {0}")]
     MergePsbt(String),
 
-    /// `Wallet::finalize_psbt` returned an error. Surfaced as a 400.
+    /// `Wallet::finalize_psbt` returned an error. Surfaced as a 400. Carries
+    /// the BDK signer error's rendered message (stringified in
+    /// [`asterism::core::psbt::finalize_and_extract`]).
     #[error("PSBT finalisation error: {0}")]
-    Finalize(#[source] Box<bdk_wallet::signer::SignerError>),
+    Finalize(String),
 
     /// `Wallet::finalize_psbt` returned `Ok(false)` — finalize hit no error
     /// but couldn't satisfy every input (typically: threshold not yet met).
@@ -234,6 +238,30 @@ pub enum WalletError {
         /// Human-readable parse reason.
         reason: String,
     },
+}
+
+impl WalletError {
+    /// Map a core [`ChainSyncError`] back into the federation-tagged
+    /// `WalletError` variants this app surfaces.
+    fn from_chain_sync(id: Uuid, err: ChainSyncError) -> Self {
+        match err {
+            ChainSyncError::Rpc(source) => Self::Rpc(source),
+            ChainSyncError::ApplyBlock { height, source } => {
+                Self::ApplyBlock { id, height, source }
+            }
+        }
+    }
+
+    /// Map a core [`InitWalletError`] back into the federation-tagged
+    /// `WalletError` variants this app surfaces.
+    fn from_init_wallet(id: Uuid, err: InitWalletError) -> Self {
+        match err {
+            InitWalletError::Decode(source) => Self::DecodeChangeSet { id, source },
+            InitWalletError::Load(source) => Self::LoadWallet { id, source },
+            InitWalletError::EmptyChangeSet => Self::EmptyChangeSet(id),
+            InitWalletError::Create(source) => Self::CreateWallet { id, source },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,35 +329,14 @@ impl WalletManager {
             network: row.network.clone(),
         })?;
 
-        let (wallet, initial_changeset) = if let Some(json) = row.bdk_changeset {
-            tracing::debug!(federation_id = %federation_id, "loading wallet from persisted changeset");
-            let aggregate: ChangeSet =
-                serde_json::from_value(json).map_err(|source| WalletError::DecodeChangeSet {
-                    id: federation_id,
-                    source,
-                })?;
-            let wallet = Wallet::load()
-                .check_network(network)
-                .load_wallet_no_persist(aggregate.clone())
-                .map_err(|source| WalletError::LoadWallet {
-                    id: federation_id,
-                    source,
-                })?
-                .ok_or(WalletError::EmptyChangeSet(federation_id))?;
-            (wallet, aggregate)
-        } else {
+        // Init-or-load BDK construction lives in `asterism::core::chain_sync`
+        // (E3b). On the fresh path core leaves the staged changeset intact so
+        // we persist the initial changeset here, exactly as before.
+        let loaded = chain_sync::init_or_load_wallet(network, row.descriptor.clone(), row.bdk_changeset)
+            .map_err(|e| WalletError::from_init_wallet(federation_id, e))?;
+        let (wallet, initial_changeset) = if loaded.fresh {
             tracing::info!(federation_id = %federation_id, %network, "initializing fresh BDK wallet for federation");
-            // `create_from_two_path_descriptor` requires `D: 'static`, so
-            // hand it an owned `String` rather than a borrow of `row`.
-            let descriptor = row.descriptor.clone();
-            let mut wallet = Wallet::create_from_two_path_descriptor(descriptor)
-                .network(network)
-                .create_wallet_no_persist()
-                .map_err(|source| WalletError::CreateWallet {
-                    id: federation_id,
-                    source: Box::new(source),
-                })?;
-
+            let mut wallet = loaded.wallet;
             let initial = wallet.take_staged().unwrap_or_default();
             let json = serde_json::to_value(&initial).map_err(WalletError::EncodeChangeSet)?;
             let tip = wallet.latest_checkpoint().height();
@@ -341,6 +348,9 @@ impl WalletManager {
             )
             .await?;
             (wallet, initial)
+        } else {
+            tracing::debug!(federation_id = %federation_id, "loading wallet from persisted changeset");
+            (loaded.wallet, loaded.changeset)
         };
 
         let fw = Arc::new(FederationWallet {
@@ -433,8 +443,9 @@ pub struct SyncSummary {
 }
 
 impl FederationWallet {
-    /// Drive `bdk_bitcoind_rpc::Emitter` until the wallet matches bitcoind's
-    /// tip, apply mempool transactions, and persist the resulting changeset.
+    /// Drive [`asterism::core::chain_sync::emitter_sync`] until the wallet
+    /// matches bitcoind's tip, apply mempool transactions, and persist the
+    /// resulting changeset.
     ///
     /// Cheap (and idempotent) when the wallet is already in sync — that's
     /// the common case after the first request for a given federation.
@@ -444,41 +455,21 @@ impl FederationWallet {
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            let cp = wallet.latest_checkpoint();
-            let start_height = cp.height();
-            let mut emitter = Emitter::new(&*self.rpc, cp, start_height, NO_EXPECTED_MEMPOOL_TXS);
-
-            let mut new_blocks = 0u32;
-            while let Some(block_event) = emitter.next_block()? {
-                let height = block_event.block_height();
-                let connected_to = block_event.connected_to();
-                wallet
-                    .apply_block_connected_to(&block_event.block, height, connected_to)
-                    .map_err(|source| WalletError::ApplyBlock {
-                        id: self.id,
-                        height,
-                        source,
-                    })?;
-                new_blocks = new_blocks.saturating_add(1);
-            }
-
-            let mempool = emitter.mempool()?;
-            let new_mempool_txs = u32::try_from(mempool.update.len()).unwrap_or(u32::MAX);
-            wallet.apply_unconfirmed_txs(mempool.update);
-
-            let tip_height = wallet.latest_checkpoint().height();
-            let delta = wallet.take_staged();
+            // Pure-BDK emitter drive lives in `asterism::core::chain_sync` (E3b);
+            // persistence (changeset merge + DB write) stays here.
+            let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
+                .map_err(|e| WalletError::from_chain_sync(self.id, e))?;
             // Drop the BDK guard before falling out of the block so no
             // other request holds the wallet mutex across the DB await
             // below.
             drop(wallet);
             (
                 SyncSummary {
-                    tip_height,
-                    new_blocks,
-                    new_mempool_txs,
+                    tip_height: result.tip_height,
+                    new_blocks: result.blocks_synced,
+                    new_mempool_txs: result.new_mempool_txs,
                 },
-                delta,
+                result.changeset,
             )
         };
 
@@ -725,15 +716,16 @@ impl FederationWallet {
 
         let (psbt, delta, tip) = {
             let mut wallet = self.inner.lock().await;
-            let psbt = {
-                let mut builder = wallet.build_tx();
-                builder
-                    .add_recipient(recipient.script_pubkey(), amount)
-                    .fee_rate(fee_rate);
-                builder
-                    .finish()
-                    .map_err(|e| WalletError::CreateTx(e.to_string()))?
-            };
+            let psbt = core_psbt::build_spend(
+                &mut wallet,
+                recipient.script_pubkey(),
+                amount,
+                fee_rate,
+            )
+            .map_err(|e| match e {
+                PsbtError::BuildFailed(s) => WalletError::CreateTx(s),
+                other => WalletError::CreateTx(other.to_string()),
+            })?;
 
             let delta = wallet.take_staged();
             let tip = wallet.latest_checkpoint().height();
@@ -1374,12 +1366,14 @@ impl FederationWallet {
         base_psbt_b64: &str,
         partial_b64: &str,
     ) -> Result<MergedPsbt, WalletError> {
-        let mut base =
+        let base =
             Psbt::from_str(base_psbt_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
         let partial =
             Psbt::from_str(partial_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
-        base.combine(partial)
-            .map_err(|e| WalletError::MergePsbt(e.to_string()))?;
+        let base = core_psbt::combine_psbt(base, partial).map_err(|e| match e {
+            PsbtError::Bitcoin(s) => WalletError::MergePsbt(s),
+            other => WalletError::MergePsbt(other.to_string()),
+        })?;
 
         // Probe finalization on a clone so failure doesn't poison `base`.
         let wallet = self.inner.lock().await;
@@ -1403,19 +1397,16 @@ impl FederationWallet {
     /// - [`WalletError::NotEnoughSignatures`] if finalize hits no error but
     ///   still can't satisfy every input (threshold not yet met).
     pub async fn finalize_and_extract(&self, psbt_b64: &str) -> Result<FinalizedTx, WalletError> {
-        let mut psbt = Psbt::from_str(psbt_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
-        let wallet = self.inner.lock().await;
-        let done = wallet
-            .finalize_psbt(&mut psbt, SignOptions::default())
-            .map_err(|e| WalletError::Finalize(Box::new(e)))?;
-        drop(wallet);
-        if !done {
-            return Err(WalletError::NotEnoughSignatures);
-        }
-        let tx = psbt
-            .extract_tx()
-            .map_err(|e| WalletError::ExtractTx(e.to_string()))?;
-        let txid = tx.compute_txid();
+        let psbt = Psbt::from_str(psbt_b64).map_err(|e| WalletError::BadPsbt(e.to_string()))?;
+        let (tx, txid) = {
+            let wallet = self.inner.lock().await;
+            core_psbt::finalize_and_extract(&wallet, psbt).map_err(|e| match e {
+                PsbtError::ThresholdNotMet => WalletError::NotEnoughSignatures,
+                PsbtError::ExtractFailed(s) => WalletError::ExtractTx(s),
+                PsbtError::FinalizationFailed(s) => WalletError::Finalize(s),
+                other => WalletError::Finalize(other.to_string()),
+            })?
+        };
         let mut buf = Vec::new();
         tx.consensus_encode(&mut buf)
             .map_err(|e| WalletError::ExtractTx(e.to_string()))?;

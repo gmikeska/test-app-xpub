@@ -12,7 +12,7 @@ Core regtest node:
    browser to derive an XPUB at `m/48'/1'/0'/2'`, assembles a BIP-380
    descriptor key `[<root_fingerprint>/48'/1'/0'/2']<xpub>`, and POSTs
    it back to the server. The handler validates the key by constructing
-   an [`asterism_xpub::ExternalSigner`] and persists the result.
+   an [`asterism::xpub::ExternalSigner`] and persists the result.
 3. **Federation membership.** `/home` lists every federation the user
    participates in (label, policy, network, creation date). Clicking a
    federation opens the detail page.

@@ -24,8 +24,8 @@ use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use asterism_core::NetworkType;
-use asterism_xpub::{DeviceType, ExternalSigner};
+use asterism::core::NetworkType;
+use asterism::xpub::{DeviceType, ExternalSigner};
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -195,9 +195,8 @@ pub async fn new_federation_post(
         AppError::BadFederationInput(format!("Threshold {} out of range.", body.threshold))
     })?;
 
-    let built =
-        crate::federation_build::build_federation(external_signers, threshold_u32, network_type)
-            .map_err(AppError::BadFederationInput)?;
+    let built = asterism::core::build_federation(external_signers, threshold_u32, network_type)
+        .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
     let descriptor_string = built.descriptor_string;
     let snapshot_json = built.snapshot_json;
 

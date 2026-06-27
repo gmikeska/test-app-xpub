@@ -7,17 +7,18 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Asterism library — XPUB ingestion + Signer/Federation/snapshot
-asterism-core = { path = "../asterism-core" }
-asterism-xpub = { path = "../asterism-xpub" }
+# Asterism library — consumed through the `asterism` facade. The `xpub` feature
+# pulls in asterism-core + asterism-xpub (XPUB ingestion + Signer/Federation/
+# snapshot) and nothing else.
+asterism = { path = "../asterism", features = ["xpub"] }
 bitcoin = "0.32"
 miniscript = "12"
 
 # BDK — per-federation wallet (address derivation, UTXO/tx tracking, descriptor
-# persistence via ChangeSet). Bitcoin Core RPC sync via the bdk_bitcoind_rpc
-# Emitter against the local regtest node.
+# persistence via ChangeSet). Bitcoin Core RPC chain-sync now lives in
+# `asterism::core::chain_sync` (E3b); we keep `bitcoincore-rpc` for the RPC
+# client + broadcast calls.
 bdk_wallet = { version = "3.1", features = ["std"] }
-bdk_bitcoind_rpc = "0.22"
 bitcoincore-rpc = "0.19"
 
 # Server-side QR rendering for the address detail page.

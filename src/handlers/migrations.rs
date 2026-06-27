@@ -23,18 +23,18 @@ use axum_extra::extract::Form;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use asterism_core::NetworkType;
-use asterism_xpub::ExternalSigner;
+use asterism::core::NetworkType;
+use asterism::xpub::ExternalSigner;
 use bitcoin::Amount;
 
 use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db::{self, NewPendingMigration};
 use crate::error::AppError;
-use crate::federation_build::build_federation;
+use asterism::core::build_federation;
 use crate::handlers::federations::{BalanceView, CosignerView, FederationView, load_header};
 use crate::handlers::new_federation::{parse_device_type, resolve_member_signers};
-use crate::roster::{RosterAction, compute_roster_plan, validate_threshold};
+use asterism::core::roster::{RosterAction, compute_roster_plan, validate_threshold};
 
 // ---------------------------------------------------------------------------
 // Member view (shared by the Federation tab's migrate form)
@@ -96,7 +96,11 @@ pub async fn migrate_post(
     // Roster arithmetic (pure, validated).
     let plan = compute_roster_plan(&current_ids, &body.add_ids, &body.remove_ids)
         .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
-    let threshold = validate_threshold(body.threshold, plan.next_members.len())
+    // Convert the form's i32 threshold to u32 at the edge — core's roster API
+    // speaks u32/NonZeroU32 (the i32 stays the storage shape, see `next_threshold`).
+    let threshold_m = u32::try_from(body.threshold)
+        .map_err(|_| AppError::BadFederationInput("threshold must be a positive integer".to_string()))?;
+    let threshold = validate_threshold(threshold_m, plan.next_members.len())
         .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
 
     // Resolve the next version's signers and build its descriptor/snapshot.
@@ -128,10 +132,10 @@ pub async fn migrate_post(
 
     let built = build_federation(
         signers,
-        threshold,
+        threshold.get(),
         NetworkType::Bitcoin(state.config.network),
     )
-    .map_err(AppError::BadFederationInput)?;
+    .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
 
     // Build the migration sweep transaction BEFORE persisting anything, so an
     // unfunded federation (nothing to sweep) fails cleanly without leaving a

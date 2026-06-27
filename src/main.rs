@@ -13,10 +13,8 @@ mod auth;
 mod config;
 mod db;
 mod error;
-mod federation_build;
 mod handlers;
 mod models;
-mod roster;
 mod wallet;
 
 use std::net::SocketAddr;
