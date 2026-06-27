@@ -4,7 +4,7 @@
 //! a `tokio::sync::Mutex`. State is persisted as a JSON-encoded
 //! `bdk_wallet::ChangeSet` on the `federations.bdk_changeset` column, and
 //! chain data is sourced from the local Bitcoin Core node via
-//! [`asterism::core::chain_sync::emitter_sync`].
+//! [`emvault::core::chain_sync::emitter_sync`].
 //!
 //! # Concurrency model
 //!
@@ -29,10 +29,10 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use asterism::config::{hex_decode, hex_encode};
-use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
-use asterism::core::error::PsbtError;
-use asterism::core::psbt as core_psbt;
+use emvault::config::{hex_decode, hex_encode};
+use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use emvault::core::error::PsbtError;
+use emvault::core::psbt as core_psbt;
 use bdk_wallet::chain::{ChainPosition, Merge};
 use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
 use bitcoin::address::NetworkUnchecked;
@@ -188,7 +188,7 @@ pub enum WalletError {
 
     /// `Wallet::finalize_psbt` returned an error. Surfaced as a 400. Carries
     /// the BDK signer error's rendered message (stringified in
-    /// [`asterism::core::psbt::finalize_and_extract`]).
+    /// [`emvault::core::psbt::finalize_and_extract`]).
     #[error("PSBT finalisation error: {0}")]
     Finalize(String),
 
@@ -330,7 +330,7 @@ impl WalletManager {
             network: row.network.clone(),
         })?;
 
-        // Init-or-load BDK construction lives in `asterism::core::chain_sync`
+        // Init-or-load BDK construction lives in `emvault::core::chain_sync`
         // (E3b). On the fresh path core leaves the staged changeset intact so
         // we persist the initial changeset here, exactly as before.
         let loaded =
@@ -445,7 +445,7 @@ pub struct SyncSummary {
 }
 
 impl FederationWallet {
-    /// Drive [`asterism::core::chain_sync::emitter_sync`] until the wallet
+    /// Drive [`emvault::core::chain_sync::emitter_sync`] until the wallet
     /// matches bitcoind's tip, apply mempool transactions, and persist the
     /// resulting changeset.
     ///
@@ -457,7 +457,7 @@ impl FederationWallet {
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            // Pure-BDK emitter drive lives in `asterism::core::chain_sync` (E3b);
+            // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
             // persistence (changeset merge + DB write) stays here.
             let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
                 .map_err(|e| WalletError::from_chain_sync(self.id, e))?;
@@ -1765,5 +1765,5 @@ fn trezor_ref_tx_from(tx: &Transaction) -> TrezorRefTx {
     }
 }
 
-// `hex_encode` / `hex_decode` now live in `asterism::config` (imported above) —
+// `hex_encode` / `hex_decode` now live in `emvault::config` (imported above) —
 // deduplicated in extraction phase E5b.

@@ -10,9 +10,9 @@ use std::str::FromStr;
 
 use bitcoin::Network;
 
-use asterism::config::{hex_decode, optional, require};
+use emvault::config::{hex_decode, optional, require};
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app.
-pub use asterism::config::ConfigError;
+pub use emvault::config::ConfigError;
 
 /// Top-level configuration for the web app.
 #[derive(Clone, Debug)]
@@ -93,7 +93,7 @@ impl AppConfig {
         let federation_derivation_path = require("APP_FED_DERIVATION_PATH")?;
         let trezor_coin = require("TREZOR_COIN")?;
         let trezor_manifest_email =
-            optional("TREZOR_MANIFEST_EMAIL").unwrap_or_else(|| "dev@asterism.local".to_string());
+            optional("TREZOR_MANIFEST_EMAIL").unwrap_or_else(|| "dev@emvault.local".to_string());
         let trezor_manifest_app_url = optional("TREZOR_MANIFEST_APP_URL")
             .unwrap_or_else(|| format!("http://{host_ip}:{port}"));
 
@@ -109,7 +109,7 @@ impl AppConfig {
         let bitcoin_rpc_user = require("BITCOIN_RPC_USER")?;
         let bitcoin_rpc_password = require("BITCOIN_RPC_PASSWORD")?;
         let bitcoin_wallet_name =
-            optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "asterism-xpub".to_string());
+            optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-xpub".to_string());
 
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
@@ -129,4 +129,4 @@ impl AppConfig {
 }
 
 // `require`, `optional`, `hex_decode`, and `ConfigError` now live in
-// `asterism::config` (imported above) — deduplicated in extraction phase E5b.
+// `emvault::config` (imported above) — deduplicated in extraction phase E5b.

@@ -2,8 +2,8 @@
 
 > A complete, developer-oriented tour of every feature in `test-app-xpub`,
 > the self-custody reference app for
-> [`asterism-xpub`](https://github.com/gmikeska/asterism-xpub) +
-> [`asterism-core`](https://github.com/gmikeska/asterism-core).
+> [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub) +
+> [`emvault-core`](https://github.com/gmikeska/emvault-core).
 >
 > **Audience:** AI coding agents and human developers who need to understand —
 > quickly and exactly — what this app can do, how each capability is wired, and
@@ -23,7 +23,7 @@ own **hardware wallet** (Trezor and other devices), onboards its **XPUB**, and
 joins one or more **federations** (m-of-n P2WSH `sortedmulti` groups). Spending is
 a **proposal lifecycle**: a member proposes a send, each required cosigner signs
 **in their own browser** with their own device, partial signatures are merged
-server-side, and once the threshold is met any member can broadcast. The Asterism
+server-side, and once the threshold is met any member can broadcast. The EmVault
 Rust library is linked **directly** into the Axum binary — no signing service, no
 WASM, no proxy; the hardware wallet only ever talks to the browser, never the
 backend. The app also supports **creating federations in the UI**, **migrating** a
@@ -91,7 +91,7 @@ seeding of three test users. First-time users (no `signers` row) are routed to
 - The browser assembles a **BIP-380 descriptor key**
   `[<root_fingerprint>/48'/1'/0'/2']<xpub>` and POSTs it to
   `POST /onboard/signer` (JSON).
-- The server validates it by constructing an `asterism::xpub::ExternalSigner`
+- The server validates it by constructing an `emvault::xpub::ExternalSigner`
   (which runs all BIP-380/BIP-32 checks) and persists a `signers` row with
   fingerprint, xpub, derivation path, device type, and network.
 - **Device types.** The federation builders accept `DeviceType::{Trezor, Jade,
@@ -112,7 +112,7 @@ seeding of three test users. First-time users (no `signers` row) are routed to
   forces the creator into the member set (`dedupe_and_force_include_creator`),
   resolves each member's P2WSH signer (`resolve_member_signers` — collects **all**
   missing members into one `MissingMemberSigner` error), builds the canonical
-  multipath descriptor via `asterism::core::build_federation`, and atomically
+  multipath descriptor via `emvault::core::build_federation`, and atomically
   inserts the federation + memberships (`db::insert_federation_with_members`).
 - Only `wsh(sortedmulti)` federations are supported in this iteration.
 
@@ -120,7 +120,7 @@ seeding of three test users. First-time users (no `signers` row) are routed to
 
 One `bdk_wallet::Wallet` per federation, cached behind an async mutex and persisted
 as a JSON `ChangeSet` on `federations.bdk_changeset`. Chain data comes from the
-local node via `asterism::core::chain_sync::emitter_sync`.
+local node via `emvault::core::chain_sync::emitter_sync`.
 
 | Feature | Function | Route |
 |---|---|---|
@@ -214,7 +214,7 @@ without moving funds up front, then a `migration`-kind proposal (signed by the
   active version when no migration is in flight).
 - `POST /federations/{id}/migrations` (`migrate_post`) —
   1. Validates membership, "is active", and "no in-flight migration".
-  2. Computes the roster delta with `asterism::core::roster::compute_roster_plan`
+  2. Computes the roster delta with `emvault::core::roster::compute_roster_plan`
      and validates the next threshold.
   3. Resolves the next members' signers, builds the successor descriptor
      (`build_federation`).
@@ -300,17 +300,17 @@ store runs its own schema migration at startup.
 | Touch the Trezor payload / signing | `FederationWallet::trezor_sign_request` (mind the version/locktime + `sortedmulti` ordering + `PAYTOWITNESS` notes). |
 | Change signature merge/finalize/broadcast | `inject_trezor_signatures` → `merge_partial_signature` → proposals `broadcast`. |
 | Add a device type | `new_federation::parse_device_type` + onboarding tag. |
-| Change roster/migration logic | `migrations::migrate_post` + `asterism::core::roster`. |
+| Change roster/migration logic | `migrations::migrate_post` + `emvault::core::roster`. |
 | Adjust spendable-now accounting | `db::sum_inflight_inputs_for_federation` + `BalanceView::from_balance`. |
 | Add a config knob | `AppConfig` + `from_env` in `src/config.rs`. |
 
-## 5. Relationship to the rest of Asterism
+## 5. Relationship to the rest of EmVault
 
-- Library crates: [`asterism-xpub`](https://github.com/gmikeska/asterism-xpub)
+- Library crates: [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub)
   (`ExternalSigner`, `DeviceType`) and
-  [`asterism-core`](https://github.com/gmikeska/asterism-core)
+  [`emvault-core`](https://github.com/gmikeska/emvault-core)
   (`build_federation`, `roster`, `chain_sync`, PSBT pipeline), consumed via the
-  [`asterism`](https://github.com/gmikeska/asterism) facade.
+  [`emvault`](https://github.com/gmikeska/emvault) facade.
 - Hardware wallet only talks to the **browser** (`@trezor/connect@9`); the backend
   never sees the device.
 - Sibling app (custodial, HSM-backed, server-side autonomous signing, two chains):

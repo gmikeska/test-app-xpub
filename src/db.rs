@@ -1450,7 +1450,7 @@ mod versioning {
 // ---------------------------------------------------------------------------
 // Phase 1 DB-layer tests (need a reachable Postgres; gated behind `db-tests`).
 //
-//   DATABASE_URL=postgres://asterism:asterism@HOST:5432/asterism_xpub \
+//   DATABASE_URL=postgres://emvault:emvault@HOST:5432/emvault_xpub \
 //     cargo test --features db-tests
 //
 // `#[sqlx::test]` provisions an isolated database per test and applies every

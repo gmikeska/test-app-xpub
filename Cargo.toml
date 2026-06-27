@@ -2,22 +2,22 @@
 name = "test-app-xpub"
 version = "0.1.0"
 edition = "2024"
-description = "Test web app exercising asterism-xpub: user login, Trezor onboarding (XPUB capture via Trezor Connect), and federation membership homepage."
+description = "Test web app exercising emvault-xpub: user login, Trezor onboarding (XPUB capture via Trezor Connect), and federation membership homepage."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gmikeska/test-app-xpub"
 publish = false
 
 [dependencies]
-# Asterism library — consumed through the `asterism` facade. The `xpub` feature
-# pulls in asterism-core + asterism-xpub (XPUB ingestion + Signer/Federation/
+# EmVault library — consumed through the `emvault` facade. The `xpub` feature
+# pulls in emvault-core + emvault-xpub (XPUB ingestion + Signer/Federation/
 # snapshot) and nothing else.
-asterism = { path = "../asterism", features = ["xpub"] }
+emvault = { path = "../emvault", features = ["xpub"] }
 bitcoin = "0.32"
 miniscript = "12"
 
 # BDK — per-federation wallet (address derivation, UTXO/tx tracking, descriptor
 # persistence via ChangeSet). Bitcoin Core RPC chain-sync now lives in
-# `asterism::core::chain_sync` (E3b); we keep `bitcoincore-rpc` for the RPC
+# `emvault::core::chain_sync` (E3b); we keep `bitcoincore-rpc` for the RPC
 # client + broadcast calls.
 bdk_wallet = { version = "3.1", features = ["std"] }
 bitcoincore-rpc = "0.19"

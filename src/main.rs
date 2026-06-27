@@ -1,5 +1,5 @@
 //! `test-app-xpub` — server-rendered Axum web app exercising
-//! `asterism-xpub`.
+//! `emvault-xpub`.
 //!
 //! Boot sequence:
 //! 1. Load `.env`, build [`AppConfig`].
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_secure(false) // dev: served over plain HTTP on localhost
         .with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_expiry(Expiry::OnInactivity(TimeDuration::days(7)))
-        .with_name("asterism_session");
+        .with_name("emvault_session");
 
     let wallets = Arc::new(WalletManager::new(pool.clone(), &config)?);
     tracing::info!(

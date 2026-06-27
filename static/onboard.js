@@ -26,7 +26,7 @@
 (function () {
   "use strict";
 
-  const cfg = window.ASTERISM;
+  const cfg = window.EMVAULT;
   const TrezorConnect = window.TrezorConnect;
 
   const captureBtn = document.getElementById("capture-btn");

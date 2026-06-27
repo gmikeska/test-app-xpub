@@ -20,7 +20,7 @@
 (function () {
   "use strict";
 
-  const cfg = window.ASTERISM || {};
+  const cfg = window.EMVAULT || {};
   const TrezorConnect = window.TrezorConnect;
 
   const btn = document.getElementById("sign-btn");
@@ -46,7 +46,7 @@
     await TrezorConnect.init({
       lazyLoad: true,
       manifest: {
-        email: cfg.manifestEmail || "dev@asterism.test",
+        email: cfg.manifestEmail || "dev@emvault.test",
         appUrl: cfg.manifestAppUrl || window.location.origin,
       },
     });

@@ -23,8 +23,8 @@ use axum_extra::extract::Form;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use asterism::core::NetworkType;
-use asterism::xpub::ExternalSigner;
+use emvault::core::NetworkType;
+use emvault::xpub::ExternalSigner;
 use bitcoin::Amount;
 
 use crate::AppState;
@@ -33,8 +33,8 @@ use crate::db::{self, NewPendingMigration};
 use crate::error::AppError;
 use crate::handlers::federations::{BalanceView, CosignerView, FederationView, load_header};
 use crate::handlers::new_federation::{parse_device_type, resolve_member_signers};
-use asterism::core::build_federation;
-use asterism::core::roster::{RosterAction, compute_roster_plan, validate_threshold};
+use emvault::core::build_federation;
+use emvault::core::roster::{RosterAction, compute_roster_plan, validate_threshold};
 
 // ---------------------------------------------------------------------------
 // Member view (shared by the Federation tab's migrate form)

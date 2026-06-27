@@ -1,8 +1,8 @@
 # test-app-xpub
 
 Server-rendered Axum web app that exercises
-[`asterism-xpub`](https://github.com/gmikeska/asterism-xpub/) and
-[`asterism-core`](https://github.com/gmikeska/asterism-core/) end-to-end against a local Bitcoin
+[`emvault-xpub`](https://github.com/gmikeska/emvault-xpub/) and
+[`emvault-core`](https://github.com/gmikeska/emvault-core/) end-to-end against a local Bitcoin
 Core regtest node:
 
 1. **User auth.** Email + password login (Argon2id, signed
@@ -12,7 +12,7 @@ Core regtest node:
    browser to derive an XPUB at `m/48'/1'/0'/2'`, assembles a BIP-380
    descriptor key `[<root_fingerprint>/48'/1'/0'/2']<xpub>`, and POSTs
    it back to the server. The handler validates the key by constructing
-   an [`asterism::xpub::ExternalSigner`] and persists the result.
+   an [`emvault::xpub::ExternalSigner`] and persists the result.
 3. **Federation membership.** `/home` lists every federation the user
    participates in (label, policy, network, creation date). Clicking a
    federation opens the detail page.
@@ -40,7 +40,7 @@ Core regtest node:
       hit **Broadcast** to push the extracted raw transaction to
       bitcoind via `bitcoincore-rpc`.
 
-The Asterism Rust library is linked **directly** into the Axum binary —
+The EmVault Rust library is linked **directly** into the Axum binary —
 there is no separate signing service, no WASM, no proxy. Trezor only
 talks to the browser; the backend never sees the device.
 
@@ -63,8 +63,8 @@ README is the quick-start; `FEATURES.md` is the deep reference.
 
 ## Prerequisites
 
-- **PostgreSQL** with a database `asterism_xpub` reachable via
-  `postgres://asterism:asterism@127.0.0.1:5432/asterism_xpub`
+- **PostgreSQL** with a database `emvault_xpub` reachable via
+  `postgres://emvault:emvault@127.0.0.1:5432/emvault_xpub`
   (see `.env`).
 - **Bitcoin Core regtest node** matching the RPC credentials in `.env`
   (`127.0.0.1:18443`, user `regtestbtc`, password `regtestbtcpass` by
@@ -123,11 +123,11 @@ Open <http://127.0.0.1:8090/> and log in. First-time users are sent to
 Federations are not created from the UI yet — onboarding stops once
 every member has an `ExternalSigner` row. Once each test user has
 onboarded a unique Trezor account, you can seed a federation directly
-in psql (the descriptor builder lives in `asterism-core` and is invoked
+in psql (the descriptor builder lives in `emvault-core` and is invoked
 by the `WalletManager` at first wallet load):
 
 ```bash
-PGPASSWORD=asterism psql -h localhost -U asterism -d asterism_xpub
+PGPASSWORD=emvault psql -h localhost -U emvault -d emvault_xpub
 ```
 
 Insert a row in `federations` referencing the three signer rows and

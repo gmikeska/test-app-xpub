@@ -6,7 +6,7 @@
 //!                              P2WSH (`wsh(sortedmulti)`) federations are
 //!                              supported in this iteration.
 //! - `POST /federations`     — validate, build the canonical multipath
-//!                              descriptor via `asterism-core`, and persist
+//!                              descriptor via `emvault-core`, and persist
 //!                              the federation + memberships atomically.
 //!
 //! The creator is always a member: the form's checkbox for the creator
@@ -24,8 +24,8 @@ use axum_extra::extract::Form;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use asterism::core::NetworkType;
-use asterism::xpub::{DeviceType, ExternalSigner};
+use emvault::core::NetworkType;
+use emvault::xpub::{DeviceType, ExternalSigner};
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -139,7 +139,7 @@ pub struct NewFederationForm {
 ///   member count.
 /// - [`AppError::MissingMemberSigner`] if any picked user lacks a P2WSH
 ///   signer at the configured derivation path.
-/// - [`AppError::DescriptorBuilderRejected`] if `asterism-core`'s
+/// - [`AppError::DescriptorBuilderRejected`] if `emvault-core`'s
 ///   [`DescriptorBuilder`] rejects the inputs (duplicate xpub, network
 ///   mismatch, etc.).
 /// - Any underlying SQL error.
@@ -195,7 +195,7 @@ pub async fn new_federation_post(
         AppError::BadFederationInput(format!("Threshold {} out of range.", body.threshold))
     })?;
 
-    let built = asterism::core::build_federation(external_signers, threshold_u32, network_type)
+    let built = emvault::core::build_federation(external_signers, threshold_u32, network_type)
         .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
     let descriptor_string = built.descriptor_string;
     let snapshot_json = built.snapshot_json;

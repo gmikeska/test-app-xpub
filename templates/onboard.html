@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Onboard your Trezor — Asterism{% endblock %}
+{% block title %}Onboard your Trezor — EmVault{% endblock %}
 
 {% block nav %}
   <span class="user">{{ email }}</span>
@@ -11,7 +11,7 @@
 
 {% block head %}
   <script>
-    window.ASTERISM = {
+    window.EMVAULT = {
       trezorCoin: {{ trezor_coin|json|safe }},
       manifestEmail: {{ trezor_manifest_email|json|safe }},
       manifestAppUrl: {{ trezor_manifest_app_url|json|safe }},

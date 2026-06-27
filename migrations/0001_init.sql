@@ -1,9 +1,9 @@
--- test-app-xpub schema (asterism_xpub database).
+-- test-app-xpub schema (emvault_xpub database).
 --
 -- The web app's domain model:
 --   users               -- login identities (email + Argon2id hash)
 --   signers             -- onboarded hardware-wallet xpubs (one+ per user)
---   federations         -- asterism Federation snapshots
+--   federations         -- emvault Federation snapshots
 --   federation_members  -- which user/signer participates in which federation
 --
 -- "First login" for a given user is defined as: the user has zero rows in
@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS users_email_idx ON users (lower(email));
 -- ----------------------------------------------------------------------------
 --
 -- Captured from the user's hardware wallet via the browser. Each row mirrors
--- the inputs to `asterism::xpub::ExternalSigner::from_descriptor_key(...)`:
+-- the inputs to `emvault::xpub::ExternalSigner::from_descriptor_key(...)`:
 -- the literal descriptor-key string the device exported, plus the parsed
 -- (fingerprint, derivation_path, xpub) triple so the homepage can render
 -- them without re-parsing.

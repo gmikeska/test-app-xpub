@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
-use asterism::xpub::{DeviceType, ExternalSigner};
+use emvault::xpub::{DeviceType, ExternalSigner};
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -187,7 +187,7 @@ pub async fn onboard_signer_post(
 
 // ---------------------------------------------------------------------------
 // Small extension shims — keep handler code expressive without polluting the
-// public surface of `asterism-xpub` with stringly-typed accessors.
+// public surface of `emvault-xpub` with stringly-typed accessors.
 // ---------------------------------------------------------------------------
 
 trait ExternalSignerStringExt {
@@ -198,12 +198,12 @@ trait ExternalSignerStringExt {
 
 impl ExternalSignerStringExt for ExternalSigner {
     fn fingerprint_hex(&self) -> String {
-        use asterism::core::Signer as _;
+        use emvault::core::Signer as _;
         self.fingerprint().to_string()
     }
 
     fn derivation_path_with_master(&self) -> String {
-        use asterism::core::Signer as _;
+        use emvault::core::Signer as _;
         // `DerivationPath::Display` emits child numbers separated by `/`
         // without the leading `m/`. We prefix it so the column matches the
         // canonical BIP-32 spelling.
@@ -216,7 +216,7 @@ impl ExternalSignerStringExt for ExternalSigner {
     }
 
     fn xpub_string(&self) -> String {
-        use asterism::core::Signer as _;
+        use emvault::core::Signer as _;
         self.xpub().to_string()
     }
 }

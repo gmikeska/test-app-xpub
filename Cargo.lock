@@ -134,44 +134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asterism"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "asterism-xpub",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "asterism-core"
-version = "0.1.0"
-dependencies = [
- "bdk_bitcoind_rpc",
- "bdk_wallet",
- "bitcoin",
- "bitcoincore-rpc",
- "hex",
- "miniscript",
- "serde",
- "serde_json",
- "serde_with",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "asterism-xpub"
-version = "0.1.0"
-dependencies = [
- "asterism-core",
- "bitcoin",
- "miniscript",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -776,6 +738,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "emvault"
+version = "0.1.0"
+dependencies = [
+ "emvault-core",
+ "emvault-xpub",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "emvault-core"
+version = "0.1.0"
+dependencies = [
+ "bdk_bitcoind_rpc",
+ "bdk_wallet",
+ "bitcoin",
+ "bitcoincore-rpc",
+ "hex",
+ "miniscript",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "emvault-xpub"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+ "emvault-core",
+ "miniscript",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2457,7 +2457,6 @@ dependencies = [
  "argon2",
  "askama",
  "askama_web",
- "asterism",
  "async-trait",
  "axum",
  "axum-extra",
@@ -2466,6 +2465,7 @@ dependencies = [
  "bitcoincore-rpc",
  "chrono",
  "dotenvy",
+ "emvault",
  "miniscript",
  "password-hash",
  "qrcode",
