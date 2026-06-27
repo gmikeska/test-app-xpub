@@ -332,8 +332,9 @@ impl WalletManager {
         // Init-or-load BDK construction lives in `asterism::core::chain_sync`
         // (E3b). On the fresh path core leaves the staged changeset intact so
         // we persist the initial changeset here, exactly as before.
-        let loaded = chain_sync::init_or_load_wallet(network, row.descriptor.clone(), row.bdk_changeset)
-            .map_err(|e| WalletError::from_init_wallet(federation_id, e))?;
+        let loaded =
+            chain_sync::init_or_load_wallet(network, row.descriptor.clone(), row.bdk_changeset)
+                .map_err(|e| WalletError::from_init_wallet(federation_id, e))?;
         let (wallet, initial_changeset) = if loaded.fresh {
             tracing::info!(federation_id = %federation_id, %network, "initializing fresh BDK wallet for federation");
             let mut wallet = loaded.wallet;
@@ -716,16 +717,12 @@ impl FederationWallet {
 
         let (psbt, delta, tip) = {
             let mut wallet = self.inner.lock().await;
-            let psbt = core_psbt::build_spend(
-                &mut wallet,
-                recipient.script_pubkey(),
-                amount,
-                fee_rate,
-            )
-            .map_err(|e| match e {
-                PsbtError::BuildFailed(s) => WalletError::CreateTx(s),
-                other => WalletError::CreateTx(other.to_string()),
-            })?;
+            let psbt =
+                core_psbt::build_spend(&mut wallet, recipient.script_pubkey(), amount, fee_rate)
+                    .map_err(|e| match e {
+                        PsbtError::BuildFailed(s) => WalletError::CreateTx(s),
+                        other => WalletError::CreateTx(other.to_string()),
+                    })?;
 
             let delta = wallet.take_staged();
             let tip = wallet.latest_checkpoint().height();
