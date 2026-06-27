@@ -139,6 +139,7 @@ version = "0.1.0"
 dependencies = [
  "asterism-core",
  "asterism-xpub",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

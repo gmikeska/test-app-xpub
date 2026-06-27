@@ -10,6 +10,10 @@ use std::str::FromStr;
 
 use bitcoin::Network;
 
+use asterism::config::{hex_decode, optional, require};
+// Re-exported so `crate::config::ConfigError` keeps resolving across the app.
+pub use asterism::config::ConfigError;
+
 /// Top-level configuration for the web app.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -124,42 +128,5 @@ impl AppConfig {
     }
 }
 
-fn require(var: &'static str) -> Result<String, ConfigError> {
-    std::env::var(var).map_err(|_| ConfigError::Missing { var })
-}
-
-fn optional(var: &'static str) -> Option<String> {
-    std::env::var(var).ok().filter(|s| !s.is_empty())
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err(format!("odd-length hex string ({} chars)", s.len()));
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| format!("invalid hex at byte {}: {e}", i / 2))
-        })
-        .collect()
-}
-
-/// Configuration loading errors.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    /// A required environment variable was not set.
-    #[error("required env var `{var}` is not set")]
-    Missing {
-        /// The variable name.
-        var: &'static str,
-    },
-    /// A variable was set but failed to parse.
-    #[error("env var `{var}` is invalid: {reason}")]
-    Parse {
-        /// The variable name.
-        var: &'static str,
-        /// Human-readable reason.
-        reason: String,
-    },
-}
+// `require`, `optional`, `hex_decode`, and `ConfigError` now live in
+// `asterism::config` (imported above) — deduplicated in extraction phase E5b.

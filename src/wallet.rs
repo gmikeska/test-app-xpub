@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use asterism::config::{hex_decode, hex_encode};
 use asterism::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use asterism::core::error::PsbtError;
 use asterism::core::psbt as core_psbt;
@@ -1764,36 +1765,5 @@ fn trezor_ref_tx_from(tx: &Transaction) -> TrezorRefTx {
     }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd-length hex string ({} chars)", hex.len()));
-    }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let bytes = hex.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let hi = nibble(bytes[i])?;
-        let lo = nibble(bytes[i + 1])?;
-        out.push((hi << 4) | lo);
-        i += 2;
-    }
-    Ok(out)
-}
-
-fn nibble(c: u8) -> Result<u8, String> {
-    match c {
-        b'0'..=b'9' => Ok(c - b'0'),
-        b'a'..=b'f' => Ok(c - b'a' + 10),
-        b'A'..=b'F' => Ok(c - b'A' + 10),
-        _ => Err(format!("not a hex digit: 0x{c:02x}")),
-    }
-}
+// `hex_encode` / `hex_decode` now live in `asterism::config` (imported above) —
+// deduplicated in extraction phase E5b.
