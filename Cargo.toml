@@ -11,7 +11,7 @@ publish = false
 # EmVault library — consumed through the `emvault` facade. The `xpub` feature
 # pulls in emvault-core + emvault-xpub (XPUB ingestion + Signer/Federation/
 # snapshot) and nothing else.
-emvault = { path = "../emvault", features = ["xpub"] }
+emvault = { version = "0.1", features = ["xpub"] }
 bitcoin = "0.32"
 miniscript = "12"
 

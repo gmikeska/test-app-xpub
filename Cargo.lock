@@ -742,7 +742,9 @@ dependencies = [
 
 [[package]]
 name = "emvault"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc4103742bce8ef58f965c877fa8e5239053077fe39054ff3e151a9f646f4bf"
 dependencies = [
  "emvault-core",
  "emvault-xpub",
@@ -752,6 +754,8 @@ dependencies = [
 [[package]]
 name = "emvault-core"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c2952926c29f37c760b51a9912d11eebb50789cc9c1e3cd1f3fa3b683b3f2c"
 dependencies = [
  "bdk_bitcoind_rpc",
  "bdk_wallet",
@@ -770,6 +774,8 @@ dependencies = [
 [[package]]
 name = "emvault-xpub"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3132a3454d90eb67eb5c991e317792367930da19cb7c744b08e9b72b1d466a"
 dependencies = [
  "bitcoin",
  "emvault-core",
