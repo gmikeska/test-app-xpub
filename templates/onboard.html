@@ -17,29 +17,34 @@
       manifestAppUrl: {{ trezor_manifest_app_url|json|safe }},
       derivationPath: {{ derivation_path|json|safe }},
       network: {{ network|json|safe }},
+      jadeNetwork: {{ jade_network|json|safe }},
     };
   </script>
   <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
-  <script src="/static/onboard.js" defer></script>
+  <script type="module" src="/static/onboard.js"></script>
 {% endblock %}
 
 {% block content %}
 <section class="card">
-  <h1>Onboard your Trezor</h1>
-  <p>Welcome, <strong>{{ email }}</strong>. To finish setting up your account we need to capture the extended public key (XPUB) from your Trezor at the federation derivation path. The device stays in your hands — this app never sees your seed or your private keys.</p>
+  <h1>Onboard your hardware wallet</h1>
+  <p>Welcome, <strong>{{ email }}</strong>. To finish setting up your account we need to capture the extended public key (XPUB) from your device at the federation derivation path. The device stays in your hands — this app never sees your seed or your private keys.</p>
 
   <dl class="kv">
     <dt>Network</dt><dd><code>{{ network }}</code></dd>
     <dt>Derivation path</dt><dd><code>{{ derivation_path }}</code></dd>
-    <dt>Trezor coin</dt><dd><code>{{ trezor_coin }}</code></dd>
   </dl>
 
   <form id="onboard-form" class="form">
+    <fieldset class="device-picker">
+      <legend>Which device are you onboarding?</legend>
+      <label><input type="radio" name="device" value="Trezor" checked> Trezor <small>(browser popup)</small></label>
+      <label><input type="radio" name="device" value="Jade"> Blockstream Jade <small>(USB — Chromium only)</small></label>
+    </fieldset>
     <label>
       <span>Label (optional)</span>
       <input type="text" name="label" id="label" placeholder="e.g. My Trezor Model T" maxlength="64">
     </label>
-    <button type="button" id="capture-btn" class="btn btn-primary">Connect Trezor &amp; capture XPUB</button>
+    <button type="button" id="capture-btn" class="btn btn-primary">Connect device &amp; capture XPUB</button>
   </form>
 
   <div id="status" class="status" role="status" aria-live="polite"></div>

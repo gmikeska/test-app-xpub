@@ -16,7 +16,21 @@
  * matching the connected device's public key. The browser doesn't need to
  * compute slot indices — Trezor itself returns one signature per input that
  * we forward verbatim.
+ *
+ * Jade signing (added): when the server's sign-data is `{ device:"jade", … }`,
+ * we register the multisig on the device and call `signPsbt`, which returns a
+ * fully signed PSBT we POST as `signed_psbt_b64`. The server merges it directly
+ * (no per-input injection). Routing is driven by the signer's onboarded
+ * `device_type`, so the user never re-picks a device here.
  */
+import {
+  JadeRpc,
+  hexToBytes,
+  pathToU32Array,
+  base64ToBytes,
+  bytesToBase64,
+} from "/static/vendor/emvault-jade/index.js";
+
 (function () {
   "use strict";
 
@@ -69,6 +83,98 @@
     return payload.signatures.map((s) => (typeof s === "string" ? s : ""));
   }
 
+  /** POST the cosigner contribution, report status, and reload. Shared. */
+  async function finishSubmit(submitUrl, body) {
+    setStatus("Submitting signature…");
+    const submitResp = await fetch(submitUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+    const submitJson = await submitResp.json().catch(() => null);
+    if (!submitResp.ok) {
+      const msg = (submitJson && submitJson.message) || `HTTP ${submitResp.status}`;
+      throw new Error(msg);
+    }
+    const ok = submitJson || { status: "?", fully_signed: false };
+    setStatus(
+      ok.fully_signed
+        ? "Signed — proposal finalized. Reloading…"
+        : `Signed (status: ${ok.status}). Reloading…`,
+      "ok",
+    );
+    window.setTimeout(() => window.location.reload(), 600);
+  }
+
+  async function signWithTrezor(signData, submitUrl) {
+    const trezor = signData.trezor;
+    if (!trezor || !Array.isArray(trezor.inputs) || !Array.isArray(trezor.outputs)) {
+      throw new Error("sign-data response missing inputs/outputs");
+    }
+    setStatus("Waiting on Trezor approval…");
+    await ensureInit();
+
+    // `version` and `locktime` MUST be forwarded — Trezor Connect defaults to
+    // `version: 1, locktime: 0` if either is omitted, while BDK builds tx with
+    // `version: 2` and `locktime` set to the current tip (anti-fee-sniping). A
+    // mismatch makes Trezor sign the wrong BIP-143 sighash and bitcoind rejects
+    // the broadcast with NULLFAIL.
+    const result = await TrezorConnect.signTransaction({
+      coin: trezor.coin,
+      inputs: trezor.inputs,
+      outputs: trezor.outputs,
+      refTxs: trezor.refTxs,
+      version: trezor.version,
+      locktime: trezor.locktime,
+    });
+    if (!result || !result.success) {
+      const err = (result && result.payload && result.payload.error) || "Unknown Trezor error";
+      throw new Error(err);
+    }
+    const signaturesHex = extractSignaturesHex(result.payload);
+    await finishSubmit(submitUrl, { signatures_hex: signaturesHex });
+  }
+
+  async function signWithJade(signData, submitUrl) {
+    const reg = signData.jade && signData.jade.register;
+    const jadeNetwork = signData.jade && signData.jade.jade_network;
+    if (!reg || !jadeNetwork || !signData.psbt_b64) {
+      throw new Error("sign-data response missing Jade register / network / psbt");
+    }
+
+    // Convert the server's JSON-friendly register into Jade's native descriptor
+    // object: fingerprint hex → bytes, derivation path string → hardened u32[].
+    const descriptor = {
+      variant: reg.variant,
+      sorted: reg.sorted,
+      threshold: reg.threshold,
+      signers: reg.signers.map((s) => ({
+        fingerprint: hexToBytes(s.fingerprint),
+        derivation: pathToU32Array(s.derivation_path),
+        xpub: s.xpub,
+        path: [],
+      })),
+    };
+
+    let jade;
+    setStatus("Requesting Jade serial port…");
+    try {
+      jade = await JadeRpc.fromSerial();
+      setStatus("Unlock the Jade (confirm PIN on the device)…");
+      await jade.unlock(jadeNetwork);
+      setStatus("Confirm the multisig registration on the Jade…");
+      await jade.registerMultisig(jadeNetwork, reg.name, descriptor);
+      setStatus("Confirm the transaction on the Jade…");
+      const signedBytes = await jade.signPsbt(jadeNetwork, base64ToBytes(signData.psbt_b64));
+      await finishSubmit(submitUrl, { signed_psbt_b64: bytesToBase64(signedBytes) });
+    } finally {
+      try {
+        if (jade) await jade.close();
+      } catch (_e) { /* ignore */ }
+    }
+  }
+
   async function signProposal() {
     btn.disabled = true;
     setStatus("Loading sign data…");
@@ -87,55 +193,13 @@
         throw new Error(`sign-data HTTP ${resp.status}: ${body.slice(0, 200)}`);
       }
       const signData = await resp.json();
-      const trezor = signData.trezor;
-      if (!trezor || !Array.isArray(trezor.inputs) || !Array.isArray(trezor.outputs)) {
-        throw new Error("sign-data response missing inputs/outputs");
+
+      // Auto-routed by the server from the signer's onboarded device_type.
+      if ((signData.device || "trezor") === "jade") {
+        await signWithJade(signData, submitUrl);
+      } else {
+        await signWithTrezor(signData, submitUrl);
       }
-
-      setStatus("Waiting on Trezor approval…");
-      await ensureInit();
-
-      // `version` and `locktime` MUST be forwarded — Trezor Connect
-      // defaults to `version: 1, locktime: 0` if either is omitted, while
-      // BDK builds tx with `version: 2` and `locktime` set to the current
-      // tip (anti-fee-sniping). A mismatch makes Trezor sign the wrong
-      // BIP-143 sighash and bitcoind rejects the broadcast with NULLFAIL.
-      const result = await TrezorConnect.signTransaction({
-        coin: trezor.coin,
-        inputs: trezor.inputs,
-        outputs: trezor.outputs,
-        refTxs: trezor.refTxs,
-        version: trezor.version,
-        locktime: trezor.locktime,
-      });
-      if (!result || !result.success) {
-        const err = (result && result.payload && result.payload.error) || "Unknown Trezor error";
-        throw new Error(err);
-      }
-
-      const signaturesHex = extractSignaturesHex(result.payload);
-      setStatus("Submitting signatures…");
-
-      const submitResp = await fetch(submitUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ signatures_hex: signaturesHex }),
-      });
-      const submitJson = await submitResp.json().catch(() => null);
-      if (!submitResp.ok) {
-        const msg = (submitJson && submitJson.message) || `HTTP ${submitResp.status}`;
-        throw new Error(msg);
-      }
-
-      const ok = submitJson || { status: "?", fully_signed: false };
-      setStatus(
-        ok.fully_signed
-          ? "Signed — proposal finalized. Reloading…"
-          : `Signed (status: ${ok.status}). Reloading…`,
-        "ok",
-      );
-      window.setTimeout(() => window.location.reload(), 600);
     } catch (e) {
       console.error(e);
       setStatus(`Signing failed: ${e.message || e}`, "error");

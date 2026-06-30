@@ -3,16 +3,21 @@
 Server-rendered Axum web app that exercises
 [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub/) and
 [`emvault-core`](https://github.com/gmikeska/emvault-core/) end-to-end against a local Bitcoin
-Core regtest node:
+Core **Signet** node:
 
 1. **User auth.** Email + password login (Argon2id, signed
    cookie-backed sessions stored in Postgres).
-2. **Trezor onboarding.** On first login (no signer row on file) the
-   user is sent to `/onboard`. The page uses `@trezor/connect@9` in the
-   browser to derive an XPUB at `m/48'/1'/0'/2'`, assembles a BIP-380
-   descriptor key `[<root_fingerprint>/48'/1'/0'/2']<xpub>`, and POSTs
-   it back to the server. The handler validates the key by constructing
-   an [`emvault::xpub::ExternalSigner`] and persists the result.
+2. **Hardware-wallet onboarding (Trezor or Jade).** On first login the
+   user is sent to `/onboard` and picks their device. **Trezor** uses
+   `@trezor/connect@9`; **Blockstream Jade** uses the vendored
+   [`@emvault/jade`](https://github.com/gmikeska/emvault-jade) driver over
+   Web Serial (USB). Either way the browser derives an XPUB at
+   `m/48'/1'/0'/2'`, assembles a BIP-380 descriptor key
+   `[<root_fingerprint>/48'/1'/0'/2']<xpub>`, and POSTs it (with
+   `device_type`) to the server, which validates it via
+   [`emvault::xpub::ExternalSigner`] and persists the result. Signing later
+   auto-routes by the stored device type, so **Trezor and Jade members can
+   co-sign the same federation**.
 3. **Federation membership.** `/home` lists every federation the user
    participates in (label, policy, network, creation date). Clicking a
    federation opens the detail page.
@@ -66,14 +71,18 @@ README is the quick-start; `FEATURES.md` is the deep reference.
 - **PostgreSQL** with a database `emvault_xpub` reachable via
   `postgres://emvault:emvault@127.0.0.1:5432/emvault_xpub`
   (see `.env`).
-- **Bitcoin Core regtest node** matching the RPC credentials in `.env`
-  (`127.0.0.1:18443`, user `regtestbtc`, password `regtestbtcpass` by
-  default). The docker-compose stack in `../btc_regtest/` provides one.
-- **Trezor device or Trezor Emulator.** The page loads
-  `@trezor/connect@9` from the official CDN; no JS build step is
-  required. On Linux you may need to install Trezor's udev rules for
-  the device to be picked up by the browser:
-  <https://wiki.trezor.io/Udev_rules>.
+- **Bitcoin Core Signet node** matching the RPC credentials in `.env`
+  (`127.0.0.1:38332`, user `signetbtc` by default — the same node
+  `emvault-jade-test` uses). Fund federation receive addresses from a
+  Signet faucet or the node's default wallet `sendtoaddress`.
+- **A hardware wallet:**
+  - **Trezor** (or Trezor Emulator) — loads `@trezor/connect@9` from the
+    official CDN; no JS build step. On Linux you may need Trezor's udev
+    rules: <https://wiki.trezor.io/Udev_rules>.
+  - **Blockstream Jade** (v1 / Plus / DIY ESP32) over **USB** — uses the
+    vendored `@emvault/jade` driver in `static/vendor/emvault-jade/` (kept
+    in sync via `scripts/check-vendor.sh`). **Web Serial requires a
+    Chromium-based desktop browser** (Chrome/Edge/Brave).
 
 ## Configuration
 

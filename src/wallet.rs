@@ -33,8 +33,8 @@ use emvault::config::{hex_decode, hex_encode};
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::error::PsbtError;
 use emvault::core::psbt as core_psbt;
-use bdk_wallet::chain::{ChainPosition, Merge};
-use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Wallet};
+use bdk_wallet::chain::{BlockId, ChainPosition, Merge};
+use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Update, Wallet};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use bitcoin::consensus::Encodable;
@@ -139,6 +139,11 @@ pub enum WalletError {
     /// Bitcoin Core RPC error (mempool / `next_block` / etc.).
     #[error("bitcoind RPC error: {0}")]
     Rpc(#[from] bitcoincore_rpc::Error),
+
+    /// Seeding a fresh federation wallet's birthday checkpoint at the node tip
+    /// failed (so its first sync wouldn't have to walk the chain from genesis).
+    #[error("failed to seed fresh wallet birthday at node tip: {0}")]
+    SeedBirthday(String),
 
     /// Failed to construct the JSON-RPC client itself (only happens for
     /// cookie auth, which we don't use, but pass through anyway).
@@ -336,11 +341,48 @@ impl WalletManager {
         let loaded =
             chain_sync::init_or_load_wallet(network, row.descriptor.clone(), row.bdk_changeset)
                 .map_err(|e| WalletError::from_init_wallet(federation_id, e))?;
-        let (wallet, initial_changeset) = if loaded.fresh {
+        let mut wallet = loaded.wallet;
+        let mut initial_changeset = if loaded.fresh {
             tracing::info!(federation_id = %federation_id, %network, "initializing fresh BDK wallet for federation");
-            let mut wallet = loaded.wallet;
-            let initial = wallet.take_staged().unwrap_or_default();
-            let json = serde_json::to_value(&initial).map_err(WalletError::EncodeChangeSet)?;
+            ChangeSet::default()
+        } else {
+            tracing::debug!(federation_id = %federation_id, "loading wallet from persisted changeset");
+            loaded.changeset
+        };
+
+        // Birthday: a federation wallet still parked at genesis (a brand-new
+        // federation, or one whose first sync never completed) can hold no funds
+        // that predate "now", so jump its checkpoint to the current node tip.
+        // Otherwise the first `emitter_sync` starts from height 0 and walks the
+        // *entire* chain over RPC — a handful of blocks on regtest, but ~hundreds
+        // of thousands on signet/mainnet (an effective hang). `height() == 0`
+        // means the wallet has tracked nothing, so this is always safe; this also
+        // heals federations created before this fix. Inserting onto the existing
+        // genesis checkpoint keeps the chain connected (no `CannotConnect`).
+        if loaded.fresh || wallet.latest_checkpoint().height() == 0 {
+            let count = self.rpc.get_block_count().map_err(WalletError::Rpc)?;
+            if count > 0 {
+                let hash = self.rpc.get_block_hash(count).map_err(WalletError::Rpc)?;
+                let height = u32::try_from(count).unwrap_or(u32::MAX);
+                let birthday = wallet.latest_checkpoint().insert(BlockId { height, hash });
+                wallet
+                    .apply_update(Update {
+                        chain: Some(birthday),
+                        ..Default::default()
+                    })
+                    .map_err(|e| WalletError::SeedBirthday(e.to_string()))?;
+                tracing::info!(
+                    federation_id = %federation_id, birthday = height,
+                    "seeded wallet birthday at node tip"
+                );
+            }
+        }
+
+        // Persist any staged delta — the fresh wallet's initial changeset and/or
+        // the birthday checkpoint — and fold it into the aggregate we hand off.
+        if let Some(delta) = wallet.take_staged() {
+            initial_changeset.merge(delta);
+            let json = serde_json::to_value(&initial_changeset).map_err(WalletError::EncodeChangeSet)?;
             let tip = wallet.latest_checkpoint().height();
             db::update_federation_changeset(
                 &self.pool,
@@ -349,11 +391,7 @@ impl WalletManager {
                 i32::try_from(tip).unwrap_or(i32::MAX),
             )
             .await?;
-            (wallet, initial)
-        } else {
-            tracing::debug!(federation_id = %federation_id, "loading wallet from persisted changeset");
-            (loaded.wallet, loaded.changeset)
-        };
+        }
 
         let fw = Arc::new(FederationWallet {
             id: federation_id,
@@ -1702,8 +1740,11 @@ const fn coin_name(network: Network) -> &'static str {
     #[allow(clippy::match_wildcard_for_single_variants, clippy::match_same_arms)]
     match network {
         Network::Bitcoin => "btc",
-        Network::Testnet => "testnet",
-        Network::Signet => "signet",
+        // Trezor Connect has no `"signet"` coin ("coin not found"). Signet
+        // shares testnet's coin params + xpub/address versions, and the
+        // BIP-143 sighash Trezor signs is network-magic-independent, so we sign
+        // it as testnet — the same `"test"` coin onboarding uses.
+        Network::Testnet | Network::Signet => "test",
         Network::Regtest => "regtest",
         _ => "regtest",
     }

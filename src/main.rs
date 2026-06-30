@@ -14,6 +14,7 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod jade;
 mod models;
 mod wallet;
 

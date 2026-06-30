@@ -85,22 +85,30 @@ seeding of three test users. First-time users (no `signers` row) are routed to
 
 ### 3.2 Hardware-wallet onboarding — `src/handlers/onboard.rs` + `static/onboard.js`
 
-- `GET /onboard` renders a page that loads `@trezor/connect@9` from the official
-  CDN (no JS build step) and calls `TrezorConnect.getPublicKey` at the configured
-  BIP-48 path (default `m/48'/1'/0'/2'` — P2WSH multisig).
-- The browser assembles a **BIP-380 descriptor key**
-  `[<root_fingerprint>/48'/1'/0'/2']<xpub>` and POSTs it to
+- `GET /onboard` renders a page with a **Trezor / Jade device picker** (`onboard.js`
+  is an ES module that imports the vendored `@emvault/jade` driver alongside the
+  CDN `@trezor/connect@9`). Both branches capture an XPUB at the configured BIP-48
+  path (default `m/48'/1'/0'/2'` — P2WSH multisig):
+  - **Trezor** → `TrezorConnect.getPublicKey`.
+  - **Jade** → `JadeRpc.fromSerial → unlock(jade_network) → getMasterFingerprintHex
+    + getXpub` over Web Serial (USB).
+- Either way the browser assembles a **BIP-380 descriptor key**
+  `[<root_fingerprint>/48'/1'/0'/2']<xpub>` and POSTs it with `device_type` to
   `POST /onboard/signer` (JSON).
 - The server validates it by constructing an `emvault::xpub::ExternalSigner`
-  (which runs all BIP-380/BIP-32 checks) and persists a `signers` row with
-  fingerprint, xpub, derivation path, device type, and network.
-- **Device types.** The federation builders accept `DeviceType::{Trezor, Jade,
-  PassportPrime, Ledger, Coldcard, Generic}` (`new_federation::parse_device_type`).
-  The current onboarding handler tags new signers as `Trezor`, but the stored
-  `device_type` round-trips through `parse_device_type` so mixed-device federations
-  are representable.
+  (device-agnostic — runs all BIP-380/BIP-32 checks) and persists a `signers` row
+  with fingerprint, xpub, derivation path, the chosen **device type**, and network.
+- **Device types.** `device_type` comes from the picker via
+  `new_federation::parse_device_type` (`Trezor` | `Jade` | … → `DeviceType`,
+  unknown → `Generic`). The choice is made **once at onboarding**; signing later
+  auto-routes by the stored type. Because it's per-signer, **mixed Trezor+Jade
+  federations co-sign the same proposal** (see §3.6).
 - Duplicate-fingerprint onboarding returns `409 Conflict` with a friendly message;
   a rejected key returns `400` with the parser's reason.
+
+> **Network note (Signet).** test-app-xpub runs on **Signet**. Jade uses
+> `network="testnet"` (signet shares testnet xpub/address versions + `tb` HRP) —
+> see `AppConfig::jade_network`. Design: `emvault_design/jade-integration.md`.
 
 ### 3.3 In-UI federation creation — `src/handlers/new_federation.rs` + `federation_new.html`
 
@@ -160,10 +168,26 @@ multiple devices.
 are *advisory only* — they surface the pushback so the proposer can decide to
 `cancel`; they do not change status.
 
-### 3.6 Trezor multisig signing protocol — `FederationWallet::trezor_sign_request` + `inject_trezor_signatures` + `static/proposal-sign.js`
+### 3.6 Device-aware multisig signing — `proposals::sign_data` / `submit_signature` + `static/proposal-sign.js`
 
-This is the subtle, must-not-regress part and the main thing the app proves about
-interactive signing. The server builds the exact payload
+`sign_data` and `submit_signature` **branch on the member's stored `device_type`**
+(`SignDataResponse` is a `#[serde(tag = "device")]` enum), and `proposal-sign.js`
+dispatches on the `device` field. The two device flows converge on the **same**
+`merge_partial_signature` → finalize → broadcast path:
+
+- **Jade** (`src/jade.rs`): `sign_data` returns the raw `psbt_b64` + a JSON-friendly
+  multisig **registration** (`build_jade_register`: `variant:"wsh(multi(k))"`,
+  `sorted:true`, `threshold`, per-member `{fingerprint, derivation_path, xpub}`) +
+  the Jade network. The browser converts it to Jade's native descriptor object
+  (`hexToBytes`/`pathToU32Array`), calls `registerMultisig` then
+  `signPsbt`, and POSTs the **full signed PSBT** as `signed_psbt_b64` — which the
+  server merges directly (Jade returns a complete partial, so no per-input
+  injection). No `refTxs`, no Trezor-shaped payload, no `lwk_wasm`.
+- **Trezor** (below): the original heavier path.
+
+#### Trezor protocol — `FederationWallet::trezor_sign_request` + `inject_trezor_signatures`
+
+This is the subtle, must-not-regress part. The server builds the exact payload
 `TrezorConnect.signTransaction` needs:
 
 - **Per input:** `script_type: "SPENDWITNESS"`, the signing device's BIP-32

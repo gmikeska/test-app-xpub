@@ -15,7 +15,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::{Deserialize, Serialize};
 
-use emvault::xpub::{DeviceType, ExternalSigner};
+use emvault::xpub::ExternalSigner;
+
+use crate::handlers::new_federation::parse_device_type;
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -38,6 +40,9 @@ struct OnboardTemplate {
     derivation_path: String,
     /// Bitcoin network label rendered in the UI.
     network: String,
+    /// Jade-firmware network identifier (e.g. `"testnet"` for Signet) for the
+    /// Jade onboarding branch.
+    jade_network: String,
 }
 
 /// `GET /onboard`
@@ -59,6 +64,7 @@ pub async fn onboard_get(
         trezor_manifest_app_url: state.config.trezor_manifest_app_url.clone(),
         derivation_path: state.config.federation_derivation_path.clone(),
         network: state.config.network.to_string(),
+        jade_network: state.config.jade_network().to_string(),
     }
     .into_response())
 }
@@ -72,6 +78,11 @@ pub struct OnboardSignerBody {
     /// Optional human-readable label.
     #[serde(default)]
     pub label: Option<String>,
+    /// Device family the key was captured from (`"Trezor"` | `"Jade"` | …).
+    /// Defaults to `"Trezor"` for back-compat with older clients. Round-trips
+    /// through [`parse_device_type`] so unknown values fall back to `Generic`.
+    #[serde(default)]
+    pub device_type: Option<String>,
 }
 
 /// Successful onboarding response.
@@ -111,10 +122,11 @@ pub async fn onboard_signer_post(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    let device = parse_device_type(body.device_type.as_deref().unwrap_or("Trezor"));
     let signer = match ExternalSigner::from_descriptor_key(
         body.descriptor_key.trim(),
         state.config.network,
-        DeviceType::Trezor,
+        device,
         label.clone(),
     ) {
         Ok(s) => s,

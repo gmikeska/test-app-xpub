@@ -126,6 +126,22 @@ impl AppConfig {
             bitcoin_wallet_name,
         })
     }
+
+    /// The network identifier Blockstream Jade firmware expects, mapped from
+    /// the configured [`Network`]. **Signet shares testnet's xpub/address
+    /// versions + `tb` HRP**, so Jade treats it as `"testnet"` (confirmed in
+    /// `emvault-jade-test`). Surfaced to the browser at onboarding and in the
+    /// Jade sign-data payload.
+    #[must_use]
+    pub fn jade_network(&self) -> &'static str {
+        match self.network {
+            Network::Bitcoin => "mainnet",
+            Network::Regtest => "localtest",
+            // Testnet + Signet (which shares testnet versions), plus any future
+            // testnet-like variant of the `#[non_exhaustive]` `Network` enum.
+            _ => "testnet",
+        }
+    }
 }
 
 // `require`, `optional`, `hex_decode`, and `ConfigError` now live in

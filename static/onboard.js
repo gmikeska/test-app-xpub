@@ -22,7 +22,13 @@
  *      Trezor firmware as e.g.
  *      `wpkh([d34db33f/48h/1h/0h/2h]tpub.../<0;1>/*)#abcd1234`. Parsed for
  *      master fingerprint. Used as a defensive fallback if (1) is absent.
+ *
+ * Jade onboarding (added): drives a Blockstream Jade over Web Serial via the
+ * vendored `@emvault/jade` driver — unlock → getXpub → assemble the same
+ * BIP-380 descriptor key — and POSTs it with `device_type:"Jade"`.
  */
+import { JadeRpc } from "/static/vendor/emvault-jade/index.js";
+
 (function () {
   "use strict";
 
@@ -121,7 +127,7 @@
     return { fingerprintHex: fpHex, originPath: path, xpub };
   }
 
-  async function capture() {
+  async function captureTrezor() {
     setStatus("Connecting to your Trezor…");
     captureBtn.disabled = true;
     try {
@@ -199,6 +205,7 @@
         fingerprint: fp,
         derivation_path: derivationPath,
         xpub,
+        device_type: "Trezor",
       };
 
       rFp.textContent = fp;
@@ -218,6 +225,72 @@
     }
   }
 
+  /**
+   * Jade onboarding over Web Serial (USB). Mirrors the Trezor capture but uses
+   * the vendored `@emvault/jade` driver; produces the same `pending` shape with
+   * `device_type:"Jade"`.
+   */
+  async function captureJade() {
+    setStatus("Requesting Jade serial port\u2026");
+    captureBtn.disabled = true;
+    let jade;
+    try {
+      jade = await JadeRpc.fromSerial();
+      setStatus("Unlock the Jade (confirm PIN on the device)\u2026");
+      await jade.unlock(cfg.jadeNetwork);
+      const fp = await jade.getMasterFingerprintHex(cfg.jadeNetwork);
+      const xpub = await jade.getXpub(cfg.jadeNetwork, cfg.derivationPath);
+      if (typeof xpub !== "string" || xpub.length === 0) {
+        throw new Error("Jade did not return an xpub for the federation path.");
+      }
+      const origin = originBody(cfg.derivationPath);
+      const derivationPath = `m/${origin}`;
+      const descriptorKey = `[${fp}/${origin}]${xpub}`;
+
+      pending = {
+        descriptor_key: descriptorKey,
+        fingerprint: fp,
+        derivation_path: derivationPath,
+        xpub,
+        device_type: "Jade",
+      };
+
+      rFp.textContent = fp;
+      rPath.textContent = derivationPath;
+      rXpub.textContent = xpub;
+      rDk.textContent = descriptorKey;
+      resultEl.hidden = false;
+      setStatus(
+        "Captured from Jade. Review and click \u201CSave and continue\u201D to finish onboarding.",
+        "ok",
+      );
+    } catch (e) {
+      console.error(e);
+      setStatus(`Capture failed: ${e.message || e}`, "error");
+    } finally {
+      try {
+        if (jade) await jade.close();
+      } catch (_e) { /* ignore */ }
+      captureBtn.disabled = false;
+    }
+  }
+
+  function selectedDevice() {
+    const r = document.querySelector('input[name="device"]:checked');
+    return r ? r.value : "Trezor";
+  }
+
+  /** Dispatch the capture to the device the user selected. */
+  async function capture() {
+    pending = null;
+    resultEl.hidden = true;
+    if (selectedDevice() === "Jade") {
+      await captureJade();
+    } else {
+      await captureTrezor();
+    }
+  }
+
   async function save() {
     if (!pending) {
       setStatus("Nothing to save. Capture the XPUB first.", "error");
@@ -229,6 +302,7 @@
       const body = {
         descriptor_key: pending.descriptor_key,
         label: (labelInput.value || "").trim() || null,
+        device_type: pending.device_type || "Trezor",
       };
       const resp = await fetch("/onboard/signer", {
         method: "POST",

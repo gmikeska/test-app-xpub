@@ -33,6 +33,7 @@ use crate::handlers::federations::{
     FederationView, format_btc_sats, format_timestamp, truncate_middle,
 };
 use crate::models::{ProposalRow, SignerRow};
+use crate::jade::{JadeRegister, build_jade_register};
 use crate::wallet::TrezorSignRequest;
 
 // ---------------------------------------------------------------------------
@@ -324,15 +325,42 @@ pub async fn detail(
 // GET /federations/:id/proposals/:pid/sign-data
 // ---------------------------------------------------------------------------
 
-/// Response shape for the JSON sign-data endpoint. The browser hands
-/// `trezor` straight to `TrezorConnect.signTransaction`, and uses
-/// `signer_fingerprint` + `signer_slots` (echoed via the wrapped struct) to
-/// extract the per-input signatures from the Trezor result before `POST`ing
-/// them back to `/signatures`.
+/// Response shape for the JSON sign-data endpoint, discriminated by `device`
+/// so the browser can run the right flow:
+///
+/// - **Trezor** — hands `trezor` straight to `TrezorConnect.signTransaction`,
+///   extracts per-input sigs, and POSTs `signatures_hex`.
+/// - **Jade** — calls `registerMultisig(jade_network, register.name,
+///   register.descriptor)` then `signPsbt(jade_network, psbt)`, and POSTs the
+///   resulting `signed_psbt_b64`.
 #[derive(Debug, Serialize)]
-pub struct SignDataResponse {
-    pub psbt_b64: String,
-    pub trezor: TrezorSignRequest,
+#[serde(tag = "device", rename_all = "lowercase")]
+pub enum SignDataResponse {
+    /// Trezor Connect signing payload.
+    Trezor {
+        /// Canonical base PSBT (base64).
+        psbt_b64: String,
+        /// Trezor-shaped `signTransaction` request.
+        trezor: TrezorSignRequest,
+    },
+    /// Jade USB signing payload.
+    Jade {
+        /// Canonical base PSBT (base64) — Jade signs this directly.
+        psbt_b64: String,
+        /// Multisig registration + the Jade network identifier.
+        jade: JadeSignData,
+    },
+}
+
+/// Jade-specific sign-data: the multisig registration the browser must apply
+/// before signing, plus the Jade-firmware network identifier (e.g. `"testnet"`
+/// for Signet).
+#[derive(Debug, Serialize)]
+pub struct JadeSignData {
+    /// Multisig registration (JSON-friendly; browser converts to native form).
+    pub register: JadeRegister,
+    /// Network argument for Jade RPCs (`unlock`/`registerMultisig`/`signPsbt`).
+    pub jade_network: String,
 }
 
 /// `GET /federations/:id/proposals/:pid/sign-data`
@@ -352,7 +380,7 @@ pub async fn sign_data(
 
     let signer = db::find_signer_for_user_in_version(&state.db, user.id, federation_id)
         .await?
-        .ok_or_else(|| AppError::BadRequest("you have no Trezor onboarded".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("you have no signer onboarded".to_string()))?;
 
     let members = db::list_federation_members_with_signers(&state.db, federation_id).await?;
     let cosigners: Vec<SignerRow> = members.into_iter().filter_map(|(_, s)| s).collect();
@@ -364,8 +392,23 @@ pub async fn sign_data(
             cosigners.len(),
         )));
     }
-    let threshold = usize::try_from(row.threshold).unwrap_or(0);
 
+    // Auto-route by the requesting member's onboarded device type.
+    if signer.device_type == "Jade" {
+        let register = build_jade_register(federation_id, row.threshold, &cosigners)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        return Ok(Json(SignDataResponse::Jade {
+            psbt_b64: proposal.psbt_b64.clone(),
+            jade: JadeSignData {
+                register,
+                jade_network: state.config.jade_network().to_string(),
+            },
+        })
+        .into_response());
+    }
+
+    // Trezor (default).
+    let threshold = usize::try_from(row.threshold).unwrap_or(0);
     let fw = state.wallets.load_or_init(federation_id).await?;
     let trezor = fw
         .trezor_sign_request(
@@ -376,7 +419,7 @@ pub async fn sign_data(
         )
         .await?;
 
-    Ok(Json(SignDataResponse {
+    Ok(Json(SignDataResponse::Trezor {
         psbt_b64: proposal.psbt_b64.clone(),
         trezor,
     })
@@ -395,7 +438,13 @@ pub async fn sign_data(
 /// practice).
 #[derive(Debug, Deserialize)]
 pub struct SubmitSignatures {
-    pub signatures_hex: Vec<String>,
+    /// Trezor: one DER-encoded ECDSA signature per PSBT input.
+    #[serde(default)]
+    pub signatures_hex: Option<Vec<String>>,
+    /// Jade: the full signed PSBT (base64) — Jade returns a complete partial
+    /// PSBT rather than per-input signatures, so it merges directly.
+    #[serde(default)]
+    pub signed_psbt_b64: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -422,18 +471,25 @@ pub async fn submit_signature(
 
     let signer = db::find_signer_for_user_in_version(&state.db, user.id, federation_id)
         .await?
-        .ok_or_else(|| AppError::BadRequest("you have no Trezor onboarded".to_string()))?;
+        .ok_or_else(|| AppError::BadRequest("you have no signer onboarded".to_string()))?;
 
     let fw = state.wallets.load_or_init(federation_id).await?;
 
-    // Inject Trezor's per-input signatures into a fresh PSBT cloned from
-    // the canonical base. That's the "partial PSBT" we both archive
-    // (`transaction_signatures.partial_psbt_b64`) and merge into base.
-    let partial_b64 = fw.inject_trezor_signatures(
-        &proposal.psbt_b64,
-        &signer.fingerprint,
-        &body.signatures_hex,
-    )?;
+    // Produce the cosigner's "partial PSBT" — the thing we both archive
+    // (`transaction_signatures.partial_psbt_b64`) and merge into the base.
+    //
+    // - **Jade** returns a complete signed PSBT, which *is* the partial.
+    // - **Trezor** returns per-input sigs we inject into a fresh clone of base.
+    let partial_b64 = if signer.device_type == "Jade" {
+        body.signed_psbt_b64.clone().ok_or_else(|| {
+            AppError::BadRequest("Jade signature submission missing `signed_psbt_b64`".to_string())
+        })?
+    } else {
+        let signatures_hex = body.signatures_hex.as_deref().ok_or_else(|| {
+            AppError::BadRequest("Trezor signature submission missing `signatures_hex`".to_string())
+        })?;
+        fw.inject_trezor_signatures(&proposal.psbt_b64, &signer.fingerprint, signatures_hex)?
+    };
 
     let merged = fw
         .merge_partial_signature(&proposal.psbt_b64, &partial_b64)
