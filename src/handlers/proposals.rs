@@ -160,9 +160,13 @@ struct ProposalTemplate {
     is_proposer: bool,
     viewer_already_signed: bool,
     viewer_already_rejected: bool,
-    /// `true` if the viewer is a federation member with a Trezor row of
+    /// `true` if the viewer is a federation member with a signer row of
     /// their own (i.e. they can sign).
     viewer_has_signer: bool,
+    /// The viewer's onboarded device family (e.g. `"Trezor"` / `"Jade"`), used
+    /// to label the Sign button. Defaults to `"Trezor"` when the viewer has no
+    /// signer (the button is hidden in that case anyway).
+    viewer_device: String,
     /// `true` if the viewer is a member of this proposal's federation version.
     /// A current signer of the lineage who is *not* a member may view the
     /// proposal read-only, so member-only actions (reject, broadcast) are gated
@@ -276,6 +280,9 @@ pub async fn detail(
     let viewer_signer_row =
         db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
     let viewer_has_signer = viewer_signer_row.is_some();
+    let viewer_device = viewer_signer_row
+        .as_ref()
+        .map_or_else(|| "Trezor".to_string(), |s| s.device_type.clone());
 
     let detail_view = ProposalDetailView {
         id: proposal.id,
@@ -315,6 +322,7 @@ pub async fn detail(
         viewer_already_signed,
         viewer_already_rejected,
         viewer_has_signer,
+        viewer_device,
         viewer_is_member,
         back_href,
     }
