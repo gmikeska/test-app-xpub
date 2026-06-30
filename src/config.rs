@@ -8,7 +8,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
-use bitcoin::Network;
+use emvault::core::bitcoin::Network;
 
 use emvault::config::{hex_decode, optional, require};
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app.

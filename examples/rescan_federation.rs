@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bitcoin::Amount;
+use emvault::core::bitcoin::Amount;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 

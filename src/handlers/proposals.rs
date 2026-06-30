@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use emvault::core::bitcoin;
 
 use askama::Template;
 use askama_web::WebTemplate;

@@ -14,6 +14,8 @@
 //! get a 200; anyone else gets a 403.
 
 use std::sync::Arc;
+use emvault::core::bitcoin;
+use emvault::core::bdk_wallet;
 
 use askama::Template;
 use askama_web::WebTemplate;
