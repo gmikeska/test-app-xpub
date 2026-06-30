@@ -58,6 +58,35 @@
         </tbody>
       </table>
     {% endif %}
+
+    {% if !g.change_addresses.is_empty() %}
+      <h3 style="margin-top:1.5rem;">Change addresses</h3>
+      <p class="muted">Internal-keychain addresses holding change from sent transactions.</p>
+      <table class="data">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Address</th>
+            <th>Received (BTC)</th>
+            <th>Unspent (BTC)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in g.change_addresses %}
+            <tr>
+              <td>{{ a.index }}</td>
+              <td>
+                <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
+                  <code>{{ a.address }}</code>
+                </a>
+              </td>
+              <td>{{ a.received_btc }}</td>
+              <td>{{ a.unspent_btc }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
   </div>
   {% endfor %}
 </section>

@@ -178,8 +178,10 @@ struct FederationGroupView {
     label: String,
     /// The default-open panel (the version the user navigated to).
     selected: bool,
-    /// Revealed external addresses for this version.
+    /// Revealed external (receive) addresses for this version.
     addresses: Vec<AddressView>,
+    /// Internal (change) addresses for this version that have held funds.
+    change_addresses: Vec<AddressView>,
 }
 
 /// Send tab — proposal form + proposals table.
@@ -205,6 +207,7 @@ struct SendTemplate {
 /// `GET /federations/:id` — 303 redirect to the default tab (Receive).
 ///
 /// Keeps existing bookmarks working after the tab split.
+#[allow(clippy::unused_async)] // axum `Handler` requires an async fn
 pub async fn redirect_to_default(Path(id): Path<Uuid>) -> Redirect {
     Redirect::to(&format!("/federations/{id}/receive"))
 }
@@ -235,6 +238,12 @@ pub async fn receive(
             .into_iter()
             .map(AddressView::from)
             .collect();
+        let change_addresses = vw
+            .change_addresses()
+            .await
+            .into_iter()
+            .map(AddressView::from)
+            .collect();
         let label = if v.status == "active" {
             format!("v{} (current)", v.version_index + 1)
         } else {
@@ -251,6 +260,7 @@ pub async fn receive(
             label,
             selected: v.id == federation_id,
             addresses,
+            change_addresses,
         });
     }
 

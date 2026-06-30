@@ -21,6 +21,9 @@ miniscript = "12"
 # client + broadcast calls.
 bdk_wallet = { version = "3.1", features = ["std"] }
 bitcoincore-rpc = "0.19"
+# Drive the chain-sync Emitter directly in `WalletManager::rescan` so we can
+# report per-block progress (the `chain_sync::emitter_sync` helper has no hook).
+bdk_bitcoind_rpc = "0.22"
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

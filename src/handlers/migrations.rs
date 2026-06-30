@@ -389,6 +389,7 @@ pub async fn federation_manage(
 
 /// Redirect the retired `/lineage` and `/migrate` tabs to the merged
 /// `/federation` tab (back-compat for bookmarks/links).
+#[allow(clippy::unused_async)] // axum `Handler` requires an async fn
 pub async fn redirect_to_federation(Path(federation_id): Path<Uuid>) -> Redirect {
     Redirect::to(&format!("/federations/{federation_id}/federation"))
 }

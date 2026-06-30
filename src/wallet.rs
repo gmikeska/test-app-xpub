@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
 use bdk_wallet::chain::{BlockId, ChainPosition, Merge};
 use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Update, Wallet};
 use bitcoin::address::NetworkUnchecked;
@@ -430,6 +431,231 @@ impl WalletManager {
         }
         Ok(summaries)
     }
+
+    /// **Rescan** a federation's wallet from `from_height` (0 = genesis) to the
+    /// node tip, rebuilding it **from the descriptor alone** — ignoring any
+    /// persisted changeset and the birthday-bootstrap in [`Self::load_or_init`] —
+    /// then **persist** the resulting changeset so the running app picks up any
+    /// recovered funds, and evict the cache so the next load reflects them.
+    ///
+    /// This is the recovery counterpart to the birthday optimization: use it
+    /// after a dev DB reset, or to rescue coins sent to a federation's addresses
+    /// before it was tracked. A full from-zero scan on signet/mainnet is slow
+    /// (one `getblock` RPC per block) — pass a `from_height` near the deposit if
+    /// you know it.
+    ///
+    /// `RESCAN_GAP` external + internal addresses are pre-revealed so the scan
+    /// can match deposits; raise it if funds were sent past that index.
+    ///
+    /// `on_progress(current_height, chain_tip)` is invoked periodically as the
+    /// scan walks blocks (every [`PROGRESS_EVERY`] blocks, plus once at the end),
+    /// so callers can render a live progress line. Pass `|_, _| {}` for none.
+    ///
+    /// # Errors
+    /// See [`WalletError`] — `NotFound`, RPC, BDK, and persistence errors.
+    pub async fn rescan<F: FnMut(u32, u32)>(
+        &self,
+        federation_id: Uuid,
+        from_height: u32,
+        mut on_progress: F,
+    ) -> Result<RescanReport, WalletError> {
+        let row = db::find_federation_by_id(&self.pool, federation_id)
+            .await?
+            .ok_or(WalletError::NotFound(federation_id))?;
+        let network = Network::from_str(&row.network).map_err(|_| WalletError::BadNetwork {
+            id: federation_id,
+            network: row.network.clone(),
+        })?;
+
+        // Fresh wallet from the descriptor ALONE (changeset = None) — we want a
+        // clean scan, not the birthday-truncated persisted state.
+        let loaded = chain_sync::init_or_load_wallet(network, row.descriptor.clone(), None)
+            .map_err(|e| WalletError::from_init_wallet(federation_id, e))?;
+        let mut wallet = loaded.wallet;
+
+        // Pre-reveal a window on both keychains: BDK only matches *revealed*
+        // scripts during a sync, so unrevealed addresses would be invisible.
+        let _ = wallet
+            .reveal_addresses_to(KeychainKind::External, RESCAN_GAP - 1)
+            .count();
+        let _ = wallet
+            .reveal_addresses_to(KeychainKind::Internal, RESCAN_GAP - 1)
+            .count();
+
+        // Start the emitter at `from_height` (0 = leave at genesis). Inserting
+        // onto the existing genesis checkpoint keeps the chain connected.
+        if from_height > 0 {
+            let hash = self
+                .rpc
+                .get_block_hash(u64::from(from_height))
+                .map_err(WalletError::Rpc)?;
+            let cp = wallet
+                .latest_checkpoint()
+                .insert(BlockId { height: from_height, hash });
+            wallet
+                .apply_update(Update {
+                    chain: Some(cp),
+                    ..Default::default()
+                })
+                .map_err(|e| WalletError::SeedBirthday(e.to_string()))?;
+        }
+
+        // Walk every block from the checkpoint to the tip, driving the emitter
+        // directly so we can report per-block progress. (`chain_sync::emitter_sync`
+        // does the same walk but exposes no hook for a live progress line.)
+        let cp = wallet.latest_checkpoint();
+        let start = cp.height();
+        let chain_tip = u32::try_from(self.rpc.get_block_count().map_err(WalletError::Rpc)?)
+            .unwrap_or(u32::MAX);
+        let mut emitter = Emitter::new(&*self.rpc, cp, start, NO_EXPECTED_MEMPOOL_TXS);
+        let mut blocks_scanned: u32 = 0;
+        while let Some(event) = emitter.next_block().map_err(WalletError::Rpc)? {
+            let height = event.block_height();
+            let connected_to = event.connected_to();
+            wallet
+                .apply_block_connected_to(&event.block, height, connected_to)
+                .map_err(|source| WalletError::ApplyBlock {
+                    id: federation_id,
+                    height,
+                    source,
+                })?;
+            blocks_scanned += 1;
+            if blocks_scanned.is_multiple_of(PROGRESS_EVERY) {
+                on_progress(height, chain_tip);
+            }
+        }
+        let mempool = emitter.mempool().map_err(WalletError::Rpc)?;
+        wallet.apply_unconfirmed_txs(mempool.update);
+        let tip_height = wallet.latest_checkpoint().height();
+        // Final tick so the progress line lands at 100% regardless of throttling.
+        on_progress(tip_height, chain_tip.max(tip_height));
+
+        // Report the funded addresses on both keychains.
+        let balance = wallet.balance();
+        let utxo_count = wallet.list_output().filter(|o| !o.is_spent).count();
+        let receive_addresses = funded_addresses(&wallet, KeychainKind::External);
+        let change_addresses = funded_addresses(&wallet, KeychainKind::Internal);
+
+        // Persist the full rescanned changeset (overwrite) so the app sees it.
+        if let Some(delta) = wallet.take_staged() {
+            let json = serde_json::to_value(&delta).map_err(WalletError::EncodeChangeSet)?;
+            db::update_federation_changeset(
+                &self.pool,
+                federation_id,
+                &json,
+                i32::try_from(tip_height).unwrap_or(i32::MAX),
+            )
+            .await?;
+        }
+        // Drop any cached (birthday-truncated) handle so the next load reloads
+        // the rescanned, now-persisted state.
+        self.cache.lock().await.remove(&federation_id);
+
+        Ok(RescanReport {
+            federation_id,
+            label: row.label,
+            from_height,
+            tip_height,
+            blocks_scanned,
+            balance,
+            utxo_count,
+            receive_addresses,
+            change_addresses,
+        })
+    }
+
+    /// [`Self::rescan`] **every** federation version in the database (across all
+    /// lineages), from `from_height`. Each federation is rescanned independently
+    /// and its result collected, so one failure doesn't abort the rest — the
+    /// returned `Vec` pairs each id with its `Ok(report)` or `Err`.
+    ///
+    /// # Errors
+    /// Only the initial listing query can fail the whole call; per-federation
+    /// failures are captured in the returned vector.
+    pub async fn rescan_all(
+        &self,
+        from_height: u32,
+    ) -> Result<Vec<(Uuid, Result<RescanReport, WalletError>)>, WalletError> {
+        let ids = db::list_all_federation_ids(&self.pool).await?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let res = self.rescan(id, from_height, |_, _| {}).await;
+            results.push((id, res));
+        }
+        Ok(results)
+    }
+
+    /// Every federation id in the database (all versions, all lineages), ordered
+    /// by creation. Lets callers drive [`Self::rescan`] per-federation with their
+    /// own progress reporting instead of the batch [`Self::rescan_all`].
+    ///
+    /// # Errors
+    /// Propagates the listing query error.
+    pub async fn federation_ids(&self) -> Result<Vec<Uuid>, WalletError> {
+        Ok(db::list_all_federation_ids(&self.pool).await?)
+    }
+}
+
+/// Walk a wallet's outputs and return the funded addresses on `keychain`,
+/// aggregated by derivation index into `(received, unspent)` totals.
+fn funded_addresses(wallet: &Wallet, keychain: KeychainKind) -> Vec<RevealedAddress> {
+    let mut seen = std::collections::BTreeMap::<u32, (Amount, Amount)>::new();
+    for utxo in wallet.list_output() {
+        if let Some((kc, idx)) = wallet.derivation_of_spk(utxo.txout.script_pubkey.clone())
+            && kc == keychain
+        {
+            let entry = seen.entry(idx).or_insert((Amount::ZERO, Amount::ZERO));
+            entry.0 += utxo.txout.value;
+            if !utxo.is_spent {
+                entry.1 += utxo.txout.value;
+            }
+        }
+    }
+    seen.into_iter()
+        .map(|(index, (received, unspent))| {
+            let info = wallet.peek_address(keychain, index);
+            RevealedAddress {
+                index,
+                keychain: info.keychain,
+                address: info.address.to_string(),
+                received,
+                unspent,
+            }
+        })
+        .collect()
+}
+
+/// Number of addresses pre-revealed per keychain before a [`WalletManager::rescan`].
+/// BDK only matches revealed scripts during a sync; raise this if a deposit
+/// landed past this gap.
+pub const RESCAN_GAP: u32 = 100;
+
+/// How often (in blocks scanned) [`WalletManager::rescan`] fires its progress
+/// callback. Coarse enough to keep RPC-bound scans from spamming the callback,
+/// fine enough to feel live.
+pub const PROGRESS_EVERY: u32 = 50;
+
+/// Result of a [`WalletManager::rescan`].
+#[derive(Debug, Clone)]
+pub struct RescanReport {
+    /// The federation that was rescanned.
+    pub federation_id: Uuid,
+    /// Its human-readable label.
+    pub label: String,
+    /// Height the scan started from (0 = genesis).
+    pub from_height: u32,
+    /// Node tip the scan reached.
+    pub tip_height: u32,
+    /// Blocks pulled in this scan.
+    pub blocks_scanned: u32,
+    /// Wallet balance after the scan.
+    pub balance: bdk_wallet::Balance,
+    /// Count of unspent outputs found.
+    pub utxo_count: usize,
+    /// Funded external (receive) addresses.
+    pub receive_addresses: Vec<RevealedAddress>,
+    /// Funded internal (change) addresses.
+    pub change_addresses: Vec<RevealedAddress>,
 }
 
 /// Derive a federation descriptor's first external address **without**
@@ -612,6 +838,40 @@ impl FederationWallet {
         }
 
         Ok(results)
+    }
+
+    /// List `Internal` (change) keychain addresses that have ever received
+    /// funds, with their received/unspent totals. Read-only — change addresses
+    /// are revealed by BDK as a side effect of building spends, so this never
+    /// stages a changeset.
+    pub async fn change_addresses(&self) -> Vec<RevealedAddress> {
+        let wallet = self.inner.lock().await;
+        // Aggregate by derivation index so multiple UTXOs at the same change
+        // address collapse into one row: index -> (received, unspent).
+        let mut seen = std::collections::BTreeMap::<u32, (Amount, Amount)>::new();
+        for utxo in wallet.list_output() {
+            if let Some((KeychainKind::Internal, idx)) =
+                wallet.derivation_of_spk(utxo.txout.script_pubkey.clone())
+            {
+                let entry = seen.entry(idx).or_insert((Amount::ZERO, Amount::ZERO));
+                entry.0 += utxo.txout.value;
+                if !utxo.is_spent {
+                    entry.1 += utxo.txout.value;
+                }
+            }
+        }
+        seen.into_iter()
+            .map(|(index, (received, unspent))| {
+                let info = wallet.peek_address(KeychainKind::Internal, index);
+                RevealedAddress {
+                    index,
+                    keychain: info.keychain,
+                    address: info.address.to_string(),
+                    received,
+                    unspent,
+                }
+            })
+            .collect()
     }
 
     /// Resolve an externally-supplied address string into a checked

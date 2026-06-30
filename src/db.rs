@@ -339,6 +339,17 @@ pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Opti
     .await
 }
 
+/// List **every** federation-version id (one row per version, across all
+/// lineages), oldest first. Used by the rescan tool's "all federations" mode.
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn list_all_federation_ids(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM federations ORDER BY created_at, id")
+        .fetch_all(pool)
+        .await
+}
+
 /// `true` iff `user_id` has a `federation_members` row for `federation_id`.
 ///
 /// # Errors

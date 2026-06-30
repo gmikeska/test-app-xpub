@@ -9,22 +9,12 @@
 //! 5. Seed the four test users (idempotent).
 //! 6. Build the router and serve on `APP_HOST:APP_PORT`.
 
-mod auth;
-mod config;
-mod db;
-mod error;
-mod handlers;
-mod jade;
-mod models;
-mod wallet;
-
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use axum::Router;
 use axum::routing::{get, post};
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use time::Duration as TimeDuration;
 use tokio::signal;
@@ -39,19 +29,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-use crate::config::AppConfig;
-use crate::wallet::WalletManager;
-
-/// Application state injected into every handler.
-#[derive(Clone)]
-pub struct AppState {
-    /// Application configuration loaded at startup.
-    pub config: AppConfig,
-    /// Shared `PostgreSQL` connection pool.
-    pub db: PgPool,
-    /// Per-federation BDK wallet cache + Bitcoin Core RPC client.
-    pub wallets: Arc<WalletManager>,
-}
+use test_app_xpub::config::AppConfig;
+use test_app_xpub::wallet::WalletManager;
+use test_app_xpub::{AppState, auth, db, handlers};
 
 // Boot sequence is linear and well-commented; splitting just to satisfy the
 // 100-line cap would obscure the relative ordering of `migrate → seed →
