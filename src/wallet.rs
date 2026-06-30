@@ -29,10 +29,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use emvault::config::{hex_decode, hex_encode};
-use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
-use emvault::core::error::PsbtError;
-use emvault::core::psbt as core_psbt;
 use bdk_wallet::chain::{BlockId, ChainPosition, Merge};
 use bdk_wallet::{AddressInfo, ChangeSet, KeychainKind, SignOptions, Update, Wallet};
 use bitcoin::address::NetworkUnchecked;
@@ -42,6 +38,10 @@ use bitcoin::ecdsa::Signature as EcdsaSignature;
 use bitcoin::sighash::EcdsaSighashType;
 use bitcoin::{Address, Amount, FeeRate, Network, Psbt, PublicKey, ScriptBuf, Transaction, Txid};
 use bitcoincore_rpc::{Auth, Client as RpcClient, RpcApi};
+use emvault::config::{hex_decode, hex_encode};
+use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use emvault::core::error::PsbtError;
+use emvault::core::psbt as core_psbt;
 use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
@@ -382,7 +382,8 @@ impl WalletManager {
         // the birthday checkpoint — and fold it into the aggregate we hand off.
         if let Some(delta) = wallet.take_staged() {
             initial_changeset.merge(delta);
-            let json = serde_json::to_value(&initial_changeset).map_err(WalletError::EncodeChangeSet)?;
+            let json =
+                serde_json::to_value(&initial_changeset).map_err(WalletError::EncodeChangeSet)?;
             let tip = wallet.latest_checkpoint().height();
             db::update_federation_changeset(
                 &self.pool,

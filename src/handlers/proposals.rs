@@ -32,8 +32,8 @@ use crate::error::AppError;
 use crate::handlers::federations::{
     FederationView, format_btc_sats, format_timestamp, truncate_middle,
 };
-use crate::models::{ProposalRow, SignerRow};
 use crate::jade::{JadeRegister, build_jade_register};
+use crate::models::{ProposalRow, SignerRow};
 use crate::wallet::TrezorSignRequest;
 
 // ---------------------------------------------------------------------------
