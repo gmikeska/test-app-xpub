@@ -1,344 +1,279 @@
-# test-app-xpub — Feature Guide
+# test-app-xpub — Crate Integration Guide
 
-> A complete, developer-oriented tour of every feature in `test-app-xpub`,
-> the self-custody reference app for
+> **How `test-app-xpub` consumes the EmVault crates** to build a self-custody,
+> multi-party (m-of-n P2WSH) wallet. This is the *reference integration* for
 > [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub) +
-> [`emvault-core`](https://github.com/gmikeska/emvault-core).
+> [`emvault-core`](https://github.com/gmikeska/emvault-core) (via the
+> [`emvault`](https://github.com/gmikeska/emvault) facade): for each library
+> capability, it shows the exact API the app calls, where (`src/file.rs::symbol`
+> ↔ `emvault::…::symbol`), and the integration pattern + gotchas.
 >
-> **Audience:** AI coding agents and human developers who need to understand —
-> quickly and exactly — what this app can do, how each capability is wired, and
-> which function/route to reach for. Every feature is cross-linked to the source
-> symbol that implements it (`src/file.rs::symbol`). For the high-level pitch,
-> prerequisites, and config reference, see [`README.md`](README.md); this
-> document is the exhaustive companion to it and supersedes the README wherever
-> the README is older than a feature (e.g. in-UI federation creation, migration,
-> and relay all post-date the README's "not from the UI yet" note).
+> **Scope:** how the app talks to the crates — *not* the UI, routes, templates,
+> HTML/JS, auth, or DB schema. (The browser device drivers, Askama pages, and
+> Postgres tables are app concerns; they appear only where they touch a crate
+> boundary.) For the run/quick-start, see [`README.md`](README.md).
 
 ---
 
-## 1. The use case in one paragraph
+## 1. The integration contract
 
-`test-app-xpub` is a **self-custody, multi-party** wallet. Each user brings their
-own **hardware wallet** (Trezor and other devices), onboards its **XPUB**, and
-joins one or more **federations** (m-of-n P2WSH `sortedmulti` groups). Spending is
-a **proposal lifecycle**: a member proposes a send, each required cosigner signs
-**in their own browser** with their own device, partial signatures are merged
-server-side, and once the threshold is met any member can broadcast. The EmVault
-Rust library is linked **directly** into the Axum binary — no signing service, no
-WASM, no proxy; the hardware wallet only ever talks to the browser, never the
-backend. The app also supports **creating federations in the UI**, **migrating** a
-federation's roster (with on-chain fund migration), and **relaying** funds that
-land on a superseded version forward to the current one. It is the testbed that
-exercises interactive (human-in-the-loop) multisig signing.
+EmVault is **linked directly into the Axum binary** — no signing service, no
+WASM, no proxy. The split of responsibility is the thing to internalize:
 
-Mental model: *a shared safe with several keyholders.* Everyone holds their own
-key; the safe opens only when enough keyholders turn theirs.
+| The **crates** own | The **app** owns |
+|---|---|
+| Signer *identity* + key-material validation (`ExternalSigner`/`Signer`) | Capturing keys from the device (browser transport) |
+| Descriptor / federation construction (`build_federation`, `DescriptorBuilder`) | Persisting the descriptor + snapshot (Postgres) |
+| The PSBT pipeline (build / combine / finalize) | Orchestrating it; **device-specific PSBT shaping** |
+| Chain-sync *drivers* (`chain_sync`) | Owning the `bdk_wallet::Wallet` + its `ChangeSet`, the RPC client, and the wallet **birthday** |
+| Roster math for migrations (`roster`) | Driving the on-chain migration (proposals) |
+| Env-parsing helpers (`emvault::config`) | App-specific config (`jade_network`, device coins) |
 
----
+Two invariants fall out of this and explain almost every design choice below:
 
-## 2. Architecture at a glance
-
-```
-   Browser + hardware wallet (Trezor Connect v9, in-page)
-            │  XPUB capture (onboard.js) · signTransaction (proposal-sign.js)
-            ▼
-   ┌────────────────────────────────────────────────────────┐
-   │                  Axum router (main.rs)                   │
-   │     session layer · ServeDir · TraceLayer                │
-   └───┬───────────┬───────────┬───────────┬─────────────────┘
-       │           │           │           │
-    auth/      onboard/   new_federation/  federations/ · proposals/
-    home       (signers)   migrations/relay  (per-federation wallet)
-       │           │           │           │
-       └───────────┴─────┬─────┴───────────┘
-                         ▼
-                  WalletManager (wallet.rs)
-                   │            │
-         FederationWallet   bitcoincore-rpc ──▶ bitcoind regtest
-         (BDK + ChangeSet)
-                         │
-              ┌──────────┴───────────────────────────────┐
-              │              PostgreSQL                    │
-              │ users · signers · federations ·            │
-              │ federation_members · federation_versions · │
-              │ migrations · transaction_proposals/        │
-              │ _signatures/_rejections · sessions         │
-              └────────────────────────────────────────────┘
-```
-
-**Boot** (`src/main.rs`): run `migrations/*.sql` in order → init the
-`tower-sessions` Postgres store → upsert three test users
-(`test1/2/3@test.com`, password `test1234`) → bind `APP_HOST:APP_PORT`
-(default `127.0.0.1:8090`).
+1. **The library never moves funds and has no persistence.** It transforms
+   public-key material and PSBTs; the app builds, signs (via the browser),
+   broadcasts, and stores everything.
+2. **The `Signer` trait is *identity*, not signing capability.** Consumer
+   hardware wallets can't sign server-side, so signing happens in the browser and
+   the crate only ever holds/handles *public* data + the resulting PSBT. This is
+   why adding a whole new device (Jade) required **zero** crate changes — see §3
+   and §6.
 
 ---
 
-## 3. Feature catalog
+## 2. The crate surface the app touches
 
-### 3.1 Authentication & sessions — `src/auth.rs`, `src/handlers/auth.rs`
-
-Same primitives as the sibling app: Argon2id PHC hashes in `users`, signed
-cookie-backed `tower-sessions` sessions in Postgres, an `AuthUser`
-login-required extractor (303-redirects to `/login` when anonymous), and idempotent
-seeding of three test users. First-time users (no `signers` row) are routed to
-`/onboard`; returning users land on `/home`.
-
-### 3.2 Hardware-wallet onboarding — `src/handlers/onboard.rs` + `static/onboard.js`
-
-- `GET /onboard` renders a page with a **Trezor / Jade device picker** (`onboard.js`
-  is an ES module that imports the vendored `@emvault/jade` driver alongside the
-  CDN `@trezor/connect@9`). Both branches capture an XPUB at the configured BIP-48
-  path (default `m/48'/1'/0'/2'` — P2WSH multisig):
-  - **Trezor** → `TrezorConnect.getPublicKey`.
-  - **Jade** → `JadeRpc.fromSerial → unlock(jade_network) → getMasterFingerprintHex
-    + getXpub` over Web Serial (USB).
-- Either way the browser assembles a **BIP-380 descriptor key**
-  `[<root_fingerprint>/48'/1'/0'/2']<xpub>` and POSTs it with `device_type` to
-  `POST /onboard/signer` (JSON).
-- The server validates it by constructing an `emvault::xpub::ExternalSigner`
-  (device-agnostic — runs all BIP-380/BIP-32 checks) and persists a `signers` row
-  with fingerprint, xpub, derivation path, the chosen **device type**, and network.
-- **Device types.** `device_type` comes from the picker via
-  `new_federation::parse_device_type` (`Trezor` | `Jade` | … → `DeviceType`,
-  unknown → `Generic`). The choice is made **once at onboarding**; signing later
-  auto-routes by the stored type. Because it's per-signer, **mixed Trezor+Jade
-  federations co-sign the same proposal** (see §3.6).
-- Duplicate-fingerprint onboarding returns `409 Conflict` with a friendly message;
-  a rejected key returns `400` with the parser's reason.
-
-> **Network note (Signet).** test-app-xpub runs on **Signet**. Jade uses
-> `network="testnet"` (signet shares testnet xpub/address versions + `tb` HRP) —
-> see `AppConfig::jade_network`. Design: `emvault_design/jade-integration.md`.
-
-### 3.3 In-UI federation creation — `src/handlers/new_federation.rs` + `federation_new.html`
-
-- `GET /federations/new` renders a member picker: every candidate user with their
-  P2WSH-signer status badge (`db::list_users_with_p2wsh_signer_status`), the
-  creator pre-checked + disabled (with a hidden field so they're always submitted),
-  the configured derivation path and network shown for sanity.
-- `POST /federations` validates label (≤100 chars) and threshold (`1 ≤ m ≤ n`),
-  forces the creator into the member set (`dedupe_and_force_include_creator`),
-  resolves each member's P2WSH signer (`resolve_member_signers` — collects **all**
-  missing members into one `MissingMemberSigner` error), builds the canonical
-  multipath descriptor via `emvault::core::build_federation`, and atomically
-  inserts the federation + memberships (`db::insert_federation_with_members`).
-- Only `wsh(sortedmulti)` federations are supported in this iteration.
-
-### 3.4 Per-federation BDK wallet — `src/wallet.rs` (`WalletManager`, `FederationWallet`)
-
-One `bdk_wallet::Wallet` per federation, cached behind an async mutex and persisted
-as a JSON `ChangeSet` on `federations.bdk_changeset`. Chain data comes from the
-local node via `emvault::core::chain_sync::emitter_sync`.
-
-| Feature | Function | Route |
+| `emvault::…` API | Purpose | App call-site |
 |---|---|---|
-| Lazy load / init from row | `WalletManager::load_or_init` | every federation page |
-| Chain sync (blocks + mempool, persists delta) | `FederationWallet::sync` | implicit |
-| Reveal receive addresses (`REVEAL_COUNT = 20`) | `reveal_addresses` | `GET /federations/{id}/receive` |
-| Balance | `FederationWallet::balance` (+ reservations, §3.7) | receive/send/federation cards |
-| Address detail (QR + receipt history, spent flags) | `address_history` + `locate_address` | `GET /federations/{id}/addresses/{address}` |
-| Tip height | `tip_height` | header |
-| First external address (no-persist) | `first_external_address` / `reveal_first_external` | migration/relay routing |
+| `xpub::ExternalSigner::from_descriptor_key` | Validate + wrap a device XPUB | `handlers/onboard.rs`, `handlers/new_federation.rs` |
+| `xpub::DeviceType` | Device-family tag (metadata) | `new_federation::parse_device_type` |
+| `core::Signer` (trait) | `fingerprint()` / `xpub()` / `derivation_path()` | `handlers/onboard.rs` (persist), `wallet.rs` |
+| `core::build_federation` | Build `wsh(sortedmulti(..))` descriptor + snapshot | `new_federation::*`, `migrations::migrate_post` |
+| `core::NetworkType` | Network passed to the builders | both builders |
+| `core::chain_sync::init_or_load_wallet` | Construct/load the BDK wallet from a descriptor | `WalletManager::load_or_init` |
+| `core::chain_sync::emitter_sync` | Drive the bitcoind Emitter to tip | `FederationWallet::sync` + sweep paths |
+| `core::psbt::build_spend` | Build an unsigned spend PSBT | `FederationWallet::build_proposal` |
+| `core::psbt::combine_psbt` | Merge a cosigner partial into the base | `FederationWallet::merge_partial_signature` |
+| `core::psbt::finalize_and_extract` | Finalize + extract the raw tx | `FederationWallet::finalize_and_extract` |
+| `core::roster::{compute_roster_plan, validate_threshold, RosterAction}` | Roster-change arithmetic | `migrations::migrate_post` |
+| `core::FederatedWallet` | Track funds across federation versions | `wallet.rs`, lineage views |
+| `config::{require, optional, hex_decode, ConfigError}` | Env parsing | `config.rs` |
 
-**Persistence model:** `Wallet::take_staged()` returns the delta since the last
-take; the manager merges it into the aggregate `ChangeSet` and writes the merged
-blob back. DB writes happen **after** the wallet mutex is released so I/O doesn't
-block other readers. This is the recommended pattern for BDK backends without a
+---
+
+## 3. Onboarding a signer — `emvault::xpub::ExternalSigner`
+
+```rust
+let signer = ExternalSigner::from_descriptor_key(
+    descriptor_key.trim(),   // "[<fp>/48'/1'/0'/2']<xpub>" captured in the browser
+    config.network,          // bitcoin::Network — validated against the key
+    device,                  // DeviceType (parse_device_type(body.device_type))
+    label,
+)?;                          // runs all BIP-380 / BIP-32 checks
+```
+
+`onboard_signer_post` (`handlers/onboard.rs`) hands the crate a **descriptor key**
+and stores the resulting `Signer`'s `fingerprint()` / `xpub()` /
+`derivation_path()` (via the `core::Signer` trait) on a `signers` row.
+
+**Integration lesson — device-agnostic onboarding.** The crate validates a
+*descriptor key*; it does not care which device produced it. Adding **Blockstream
+Jade** alongside Trezor required **no change to `emvault-xpub`**: the browser's
+Jade driver produces the same `[fp/path]xpub` string Trezor does, and only the
+`DeviceType` (pure metadata, round-tripped through `parse_device_type`) differs.
+That is the entire point of `emvault-xpub` — *"holds public-key material only; no
+USB/HID/BLE drivers, no signing code."* Device comms live in the app's browser
+layer, never the crate.
+
+---
+
+## 4. Building a federation — `emvault::core::build_federation`
+
+```rust
+let built = emvault::core::build_federation(
+    external_signers,                    // Vec<ExternalSigner> (the members)
+    threshold_u32,                       // m
+    NetworkType::Bitcoin(config.network),
+)?;                                      // -> { descriptor_string, snapshot_json }
+```
+
+`new_federation_post` resolves each member's `ExternalSigner` (from their stored
+descriptor key) and calls `build_federation`, which produces the canonical
+two-path `wsh(sortedmulti(m, …))` **multipath descriptor** plus a
+`FederationSnapshot` JSON. The app persists both verbatim — **`descriptor_string`
+is the single source of truth** for the BDK wallet (§5) and for the Jade multisig
+registration (§6). Errors surface as `DescriptorError` (via `DescriptorBuilder`).
+The same call builds the **successor** federation during migration (§7).
+
+---
+
+## 5. The BDK wallet & chain sync — `emvault::core::chain_sync` (app owns persistence)
+
+`emvault-core` has **no database**. The app owns a `bdk_wallet::Wallet` per
+federation, its serialized `ChangeSet` (JSON on `federations.bdk_changeset`), and
+the `bitcoincore-rpc` client. The crate provides two pure drivers:
+
+```rust
+// Construct or load the wallet from the federation descriptor + stored changeset.
+let loaded = chain_sync::init_or_load_wallet(network, descriptor, changeset)?;
+//   -> LoadedWallet { wallet, changeset, fresh }
+
+// Drive bdk_bitcoind_rpc::Emitter from the wallet's checkpoint to the node tip.
+let result = chain_sync::emitter_sync(&mut wallet, &rpc)?;
+//   -> SyncResult { tip_height, blocks_synced, new_mempool_txs, changeset }
+```
+
+The app's persistence pattern (`FederationWallet::sync`): drive `emitter_sync`,
+`take_staged()` the delta, `merge()` it into the aggregate `ChangeSet`, then write
+the merged blob to Postgres **after releasing the wallet mutex** (so DB I/O never
+blocks other readers). This is BDK's recommended pattern for backends without a
 native `WalletPersister`.
 
-### 3.5 Proposal lifecycle — `src/handlers/proposals.rs`
-
-The core of the self-custody model. A proposal walks an m-of-n P2WSH multisig
-through build → sign → finalize → broadcast over multiple HTTP round-trips and
-multiple devices.
-
-| Step | Route | What happens |
-|---|---|---|
-| Create | `POST /federations/{id}/proposals` | `FederationWallet::build_proposal` → unsigned PSBT + cached `proposal_json` / `coin_selection_json`. |
-| Detail | `GET /federations/{id}/proposals/{pid}` | cosigner status, actions, current PSBT state. |
-| Sign data | `GET /federations/{id}/proposals/{pid}/sign-data` | server returns the Trezor-shaped JSON payload (§3.6). |
-| Submit signature | `POST /federations/{id}/proposals/{pid}/signatures` | browser POSTs the device's partials; server injects/merges + tries finalize. |
-| Reject | `POST /federations/{id}/proposals/{pid}/rejections` | advisory `transaction_rejections` row; status unchanged. |
-| Cancel | `POST /federations/{id}/proposals/{pid}/cancel` | proposer abandons the proposal. |
-| Broadcast | `POST /federations/{id}/proposals/{pid}/broadcast` | finalize → extract → `sendrawtransaction`. |
-
-**Statuses:** `proposed` → `signing` → `finalized` → `broadcast`, plus
-`cancelled`. **Kinds** (`0006_proposal_kind.sql`): `send` (ordinary spend),
-`migration` (roster-change sweep, §3.8), `relay` (forward sweep, §3.9). Rejections
-are *advisory only* — they surface the pushback so the proposer can decide to
-`cancel`; they do not change status.
-
-### 3.6 Device-aware multisig signing — `proposals::sign_data` / `submit_signature` + `static/proposal-sign.js`
-
-`sign_data` and `submit_signature` **branch on the member's stored `device_type`**
-(`SignDataResponse` is a `#[serde(tag = "device")]` enum), and `proposal-sign.js`
-dispatches on the `device` field. The two device flows converge on the **same**
-`merge_partial_signature` → finalize → broadcast path:
-
-- **Jade** (`src/jade.rs`): `sign_data` returns the raw `psbt_b64` + a JSON-friendly
-  multisig **registration** (`build_jade_register`: `variant:"wsh(multi(k))"`,
-  `sorted:true`, `threshold`, per-member `{fingerprint, derivation_path, xpub}`) +
-  the Jade network. The browser converts it to Jade's native descriptor object
-  (`hexToBytes`/`pathToU32Array`), calls `registerMultisig` then
-  `signPsbt`, and POSTs the **full signed PSBT** as `signed_psbt_b64` — which the
-  server merges directly (Jade returns a complete partial, so no per-input
-  injection). No `refTxs`, no Trezor-shaped payload, no `lwk_wasm`.
-- **Trezor** (below): the original heavier path.
-
-#### Trezor protocol — `FederationWallet::trezor_sign_request` + `inject_trezor_signatures`
-
-This is the subtle, must-not-regress part. The server builds the exact payload
-`TrezorConnect.signTransaction` needs:
-
-- **Per input:** `script_type: "SPENDWITNESS"`, the signing device's BIP-32
-  `address_n` (pulled from the PSBT's `bip32_derivation` by master fingerprint),
-  and `multisig.pubkeys[]` — each cosigner's `HDNode` + relative `[keychain,
-  index]` suffix, **sorted lexicographically by the pubkey each cosigner derives at
-  that path**, matching `sortedmulti`'s on-chain script order. All
-  `multisig.signatures[]` start blank.
-- **Per output:** recipient outputs are `PAYTOADDRESS`; change outputs (detected
-  because the signing device's fingerprint appears in the output's
-  `bip32_derivation`) are `PAYTOWITNESS` + a `multisig` field — that combination is
-  how the firmware whitelists native P2WSH change. (`PAYTOMULTISIG` is the *legacy
-  P2SH* path and triggers a "wrong derivation path" warning — don't use it.)
-- **refTxs:** every input's previous transaction is fetched via `bitcoincore-rpc`
-  (wrapped in `spawn_blocking`) and shipped so the device can verify input amounts.
-- **Sighash envelope:** the payload echoes BDK's chosen `version` (2) and
-  `lock_time` (BDK's anti-fee-sniping `nLockTime` = current tip). **Omitting these
-  makes Trezor sign `version=1, locktime=0`, and bitcoind rejects the broadcast
-  with `mempool-script-verify-flag-failed` (NULLFAIL).**
-- **Signer slots:** for each input the server computes which slot in the sorted
-  pubkey list the signing device occupies, so the browser can pull the right
-  signature out of `result.signatures[input][slot]`.
-
-The browser ships per-input DER signatures back; `inject_trezor_signatures` slots
-them into a freshly-cloned base PSBT (matching each to its pubkey by fingerprint),
-then `merge_partial_signature` (`Psbt::combine`) folds it into the canonical PSBT
-and probes `finalize_psbt` on a clone so a failed finalize doesn't poison the base.
-
-### 3.7 Reservations (spendable-now accounting)
-
-`db::sum_inflight_inputs_for_federation` subtracts every input locked by an
-in-flight proposal (status `proposed`/`signing`/`finalized`) from the balance, so
-the "spendable now" figure (`BalanceView::from_balance(balance, reserved)`) never
-double-spends a UTXO that's already committed to a pending proposal. The
-aggregation is a SQL `SUM((coin_selection_json->>'total_input_sat')::bigint)`.
-
-### 3.8 Federation migration & lineage — `src/handlers/migrations.rs` + `federation_manage.html`
-
-Roster changes are versioned: a migration mints a **pending successor version**
-without moving funds up front, then a `migration`-kind proposal (signed by the
-**current** members) sweeps the funds and — on broadcast — enacts the version flip
-(*consent-by-signing*).
-
-- `GET /federations/{id}/federation` (`federation_manage`) — the merged
-  **Federation tab**: the whole lineage's version history with per-version
-  balances/status, a **relay** affordance on funded superseded versions the viewer
-  can sign for, and the **migrate form** (shown only to a current signer of the
-  active version when no migration is in flight).
-- `POST /federations/{id}/migrations` (`migrate_post`) —
-  1. Validates membership, "is active", and "no in-flight migration".
-  2. Computes the roster delta with `emvault::core::roster::compute_roster_plan`
-     and validates the next threshold.
-  3. Resolves the next members' signers, builds the successor descriptor
-     (`build_federation`).
-  4. Builds the **sweep tx to the successor's first address first** (so an unfunded
-     federation fails cleanly with no dangling pending version).
-  5. Persists the migration + pending version (`db::create_pending_migration`) and
-     opens a `migration`-kind proposal (`db::insert_migration_proposal`).
-- `POST /federations/{id}/migrations/{mid}/cancel` (`cancel_post`) — abandon the
-  pending version + its sweep proposal, freeing the lineage. Members only.
-- Back-compat: `/federations/{id}/migrate` and `/federations/{id}/lineage` both
-  302 to `/federation` (`redirect_to_federation`).
-- Lineage sync fan-out (`WalletManager::sync_lineage`) freshens **every** version's
-  wallet so superseded versions still detect late inflows.
-
-### 3.9 Relay sweeps — `migrations::relay_post`
-
-- `POST /federations/{id}/relay` sweeps late inflows that landed on a **superseded**
-  version forward to the lineage's **current** version.
-- Persisted as a `relay`-kind proposal **on the superseded version**, so *that
-  version's* members — including signers removed in later versions — are the ones
-  who sign (this is the explicit requirement that removed members can still move old
-  funds forward). Broadcasting it moves funds only; it does **not** change versions.
-- Relay is offered only on a funded, non-current version the viewer can actually
-  sign for.
-
-### 3.10 Configuration surface — `src/config.rs`
-
-`AppConfig::from_env` (sibling `.env` auto-loaded). Fields: `bind`
-(`APP_HOST`/`APP_PORT`, default `127.0.0.1:8090`), `session_secret`
-(`APP_SESSION_SECRET`, 64-byte hex), `database_url`, `network`
-(`BITCOIN_NETWORK`), `federation_derivation_path` (`APP_FED_DERIVATION_PATH`,
-default `"m/48'/1'/0'/2'"` — **must be double-quoted** or apostrophes strip the
-hardened markers), `bitcoin_rpc_url/user/password`, `bitcoin_wallet_name`, and the
-Trezor Connect manifest fields `trezor_coin` (`"test"` covers testnet+regtest,
-`"btc"` is mainnet), `trezor_manifest_email`, `trezor_manifest_app_url`. `RUST_LOG`
-sets the tracing filter. See the README's Configuration section for prose on each.
-
-### 3.11 Route map (current)
-
-| Method | Path | Handler |
-|---|---|---|
-| GET | `/`, `/home` | `home::root`, `home::home` |
-| GET/POST | `/login` · POST `/logout` | `auth::*` |
-| GET | `/onboard` · POST `/onboard/signer` | `onboard::*` |
-| GET | `/federations/new` · POST `/federations` | `new_federation::*` |
-| GET | `/federations/{id}` | `federations::redirect_to_default` |
-| GET | `/federations/{id}/federation` | `migrations::federation_manage` |
-| GET | `/federations/{id}/migrate`, `/lineage` | `migrations::redirect_to_federation` |
-| POST | `/federations/{id}/migrations` | `migrations::migrate_post` |
-| POST | `/federations/{id}/migrations/{mid}/cancel` | `migrations::cancel_post` |
-| POST | `/federations/{id}/relay` | `migrations::relay_post` |
-| GET | `/federations/{id}/receive`, `/send` | `federations::receive`, `send` |
-| GET | `/federations/{id}/addresses/{address}` | `addresses::show` |
-| POST | `/federations/{id}/proposals` | `proposals::create` |
-| GET | `/federations/{id}/proposals/{pid}` | `proposals::detail` |
-| GET | `/federations/{id}/proposals/{pid}/sign-data` | `proposals::sign_data` |
-| POST | `/federations/{id}/proposals/{pid}/signatures` | `proposals::submit_signature` |
-| POST | `/federations/{id}/proposals/{pid}/rejections` | `proposals::submit_rejection` |
-| POST | `/federations/{id}/proposals/{pid}/cancel` | `proposals::cancel` |
-| POST | `/federations/{id}/proposals/{pid}/broadcast` | `proposals::broadcast` |
-
-`/static/*` via `ServeDir`; everything wrapped in `TraceLayer` + the session layer.
-Pages are Askama renders; the only client-side JS is `onboard.js` and
-`proposal-sign.js` (both thin Trezor Connect drivers).
-
-### 3.12 Schema & migrations — `migrations/`
-
-`0001_init` (users, signers, federations, federation_members) ·
-`0002_bdk_wallet` (bdk_changeset, tip_height, descriptor checksum) ·
-`0003_proposals` (proposals/_signatures/_rejections) ·
-`0004_federation_versions` (lineage versioning) · `0005_migrations` (migration
-records) · `0006_proposal_kind` (`send`/`migration`/`relay`). The `tower-sessions`
-store runs its own schema migration at startup.
+**Integration lesson — the app owns the wallet "birthday."** Because
+`emitter_sync` starts at `wallet.latest_checkpoint().height()`, and a freshly
+constructed wallet sits at **genesis (height 0)**, a naive first sync walks the
+*entire* chain over RPC — fine on regtest, an effective hang on signet/mainnet
+(~260k blocks). The crate can't know a federation's birthday, so **the app sets
+it**: in `WalletManager::load_or_init`, fresh (or never-synced) wallets seed their
+checkpoint at the current node tip via
+`wallet.latest_checkpoint().insert(BlockId{ height, hash })` + `apply_update`
+before the first sync. Inserting onto the existing genesis checkpoint keeps the
+chain connected (no `CannotConnect`). This is the canonical "owning app supplies
+the birthday" responsibility the no-persistence design implies.
 
 ---
 
-## 4. Developer entry points (where to start for common tasks)
+## 6. The PSBT signing pipeline — `emvault::core::psbt` (device-agnostic)
 
-| I want to… | Start here |
+The crate exposes three primitives the app strings together; **all are
+signing-agnostic** — they accept any signed PSBT:
+
+```rust
+// 1. Build (FederationWallet::build_proposal)
+let psbt = core::psbt::build_spend(&mut wallet, recipient_spk, amount, fee_rate)?;
+// 2. Merge a cosigner partial (FederationWallet::merge_partial_signature)
+let merged = core::psbt::combine_psbt(base, partial)?;   // Psbt::combine + probe finalize
+// 3. Finalize + extract for broadcast (FederationWallet::finalize_and_extract)
+let raw_tx = core::psbt::finalize_and_extract(&merged_psbt)?;
+```
+
+**The key property: both device flows converge on these same primitives.** This is
+exactly why a second device dropped in with no core change — the *device-specific
+PSBT shaping is the app's job*, while the crate stays device-blind:
+
+```
+                         build_spend  (unsigned PSBT)
+                                │
+        ┌───────────────────────┴────────────────────────┐
+   Trezor (app-shaped)                              Jade (app-shaped)
+   trezor_sign_request → device → per-input         build_jade_register → device
+   DER sigs → inject_trezor_signatures (clone)      registerMultisig + signPsbt
+                                │                    → full signed PSBT
+        └───────────────────────┬────────────────────────┘
+                          combine_psbt   →   finalize_and_extract   →   broadcast
+```
+
+- **Trezor** (`FederationWallet::trezor_sign_request` + `inject_trezor_signatures`,
+  app-side): the app hand-builds Trezor Connect's `signTransaction` payload
+  (sorted `multisig.pubkeys` matching `sortedmulti` order, `refTxs`,
+  `version`/`locktime` echoed for the BIP-143 sighash, signer-slot map), receives
+  per-input DER sigs, and injects them into a base-PSBT clone — *then* hands it to
+  `combine_psbt`.
+- **Jade** (`src/jade::build_jade_register`, app-side): the app derives Jade's
+  multisig **registration object** (`variant`, `sorted`, `threshold`, per-member
+  `{fingerprint, derivation_path, xpub}`) from the *same federation signer data*
+  the descriptor came from, the browser registers + `signPsbt`s, and returns a
+  **complete signed PSBT** that goes straight into `combine_psbt`.
+
+`sign_data`/`submit_signature` (`handlers/proposals.rs`) pick the branch from the
+member's stored `device_type`, so **mixed Trezor + Jade federations co-sign the
+same proposal** — both partials `combine` cleanly, the threshold finalizes, and
+any member broadcasts. (Cross-network note: the app maps `Network` → each device's
+coin id — `AppConfig::jade_network` → Jade `"testnet"` for Signet, and `coin_name`
+→ Trezor `"test"`; the crate is network-aware via `NetworkType`, the device coin
+mapping is app-side.)
+
+> The Trezor payload subtleties (`PAYTOWITNESS` for native-P2WSH change, the
+> `version`/`locktime` NULLFAIL trap, slot ordering) are **app-side** device
+> protocol, not crate behavior — kept here only because they're the must-not-
+> regress part of the integration.
+
+---
+
+## 7. Funds across versions — `core::FederatedWallet` + `core::roster`
+
+Federation roster changes are **versioned migrations**, and the crate supplies the
+arithmetic while the app drives the on-chain move (library never moves funds):
+
+```rust
+// migrations::migrate_post
+let plan = roster::compute_roster_plan(&current_ids, &add_ids, &remove_ids)?; // RosterAction per member
+let threshold = roster::validate_threshold(m, plan.next_members.len())?;
+let built = build_federation(next_signers, threshold.get(), NetworkType::Bitcoin(net))?; // successor descriptor
+```
+
+The app then builds the **sweep PSBT** (a BDK `build_tx().drain_wallet()` to the
+successor's first address — app-side, via `FederationWallet::build_migration_tx`)
+and opens a `migration`-kind proposal. Broadcasting that proposal (signed by the
+*current* members through the §6 pipeline) enacts the version flip
+(*consent-by-signing*). **Relay** sweeps (superseded-version members moving late
+inflows forward) reuse the same drain + §6 pipeline. `core::FederatedWallet`
+tracks balances/ownership across versions (`find_by_signer`, `current`, …) for the
+lineage views and the `sync_lineage` fan-out.
+
+---
+
+## 8. Config helpers — `emvault::config`
+
+`AppConfig::from_env` (`config.rs`) reuses the crate's env helpers —
+`require` / `optional` / `hex_decode` / `ConfigError` — so env parsing matches the
+library crates exactly (deduped in extraction). App-only additions sit alongside:
+`federation_derivation_path` (the BIP-48 path fed to the builders), `trezor_coin`,
+and `AppConfig::jade_network()` (the `Network` → Jade-firmware-id map from §6).
+
+---
+
+## 9. Division of responsibility (cheat sheet)
+
+| Concern | EmVault crate | This app |
+|---|---|---|
+| Validate a device key | `ExternalSigner::from_descriptor_key` | capture it in the browser |
+| Build the federation descriptor | `build_federation` / `DescriptorBuilder` | persist `descriptor_string` + snapshot |
+| Build / merge / finalize a PSBT | `core::psbt::{build_spend, combine_psbt, finalize_and_extract}` | orchestrate; **shape the per-device signing** |
+| Chain data | `chain_sync::{init_or_load_wallet, emitter_sync}` | own the `Wallet` + `ChangeSet` + RPC + **birthday** |
+| Roster math | `roster::{compute_roster_plan, validate_threshold}` | drive the migration via proposals |
+| Track versions | `FederatedWallet` | lineage views + sync fan-out |
+| Device communication | *(none — by design)* | browser (`@trezor/connect`, `@emvault/jade`) |
+| Persistence / moving funds | *(none — by design)* | Postgres + broadcast |
+
+---
+
+## 10. Where to start (integration entry points)
+
+| I want to… | App call-site → crate symbol |
 |---|---|
-| Add an authenticated route | extractor `auth::AuthUser`; register in `main.rs`; follow `federations::receive`. |
-| Change proposal building | `FederationWallet::build_proposal` (+ `proposal_view_models`). |
-| Touch the Trezor payload / signing | `FederationWallet::trezor_sign_request` (mind the version/locktime + `sortedmulti` ordering + `PAYTOWITNESS` notes). |
-| Change signature merge/finalize/broadcast | `inject_trezor_signatures` → `merge_partial_signature` → proposals `broadcast`. |
-| Add a device type | `new_federation::parse_device_type` + onboarding tag. |
-| Change roster/migration logic | `migrations::migrate_post` + `emvault::core::roster`. |
-| Adjust spendable-now accounting | `db::sum_inflight_inputs_for_federation` + `BalanceView::from_balance`. |
-| Add a config knob | `AppConfig` + `from_env` in `src/config.rs`. |
+| Onboard a new device family | `handlers/onboard.rs` → `ExternalSigner::from_descriptor_key` (+ `DeviceType`); device comms are app/browser-side |
+| Construct a federation descriptor | `new_federation::new_federation_post` → `build_federation` |
+| Build/sign/finalize a spend | `FederationWallet::{build_proposal, merge_partial_signature, finalize_and_extract}` → `core::psbt::*` |
+| Add a hardware-signing flow | shape it in the app (§6), converge on `combine_psbt`; **don't** touch the crate |
+| Change chain-sync / wallet birthday | `WalletManager::load_or_init` + `FederationWallet::sync` → `chain_sync::*` |
+| Change roster/migration logic | `migrations::migrate_post` → `core::roster::*` + `build_federation` |
+| Parse a new env var | `AppConfig::from_env` → `emvault::config::{require, optional}` |
 
-## 5. Relationship to the rest of EmVault
+---
+
+## 11. Relationship to the rest of EmVault
 
 - Library crates: [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub)
-  (`ExternalSigner`, `DeviceType`) and
-  [`emvault-core`](https://github.com/gmikeska/emvault-core)
-  (`build_federation`, `roster`, `chain_sync`, PSBT pipeline), consumed via the
-  [`emvault`](https://github.com/gmikeska/emvault) facade.
-- Hardware wallet only talks to the **browser** (`@trezor/connect@9`); the backend
-  never sees the device.
-- Sibling app (custodial, HSM-backed, server-side autonomous signing, two chains):
-  [`test-app-pkcs11`](https://github.com/gmikeska/test-app-pkcs11) — see its
-  `FEATURES.md` for the contrasting model.
-- Migration design references live in `emerald_multisignature/` (e.g.
-  `xpub_federation_migration.md`).
+  (`ExternalSigner`, `DeviceType`) + [`emvault-core`](https://github.com/gmikeska/emvault-core)
+  (`build_federation`, `roster`, `chain_sync`, `core::psbt`, `FederatedWallet`),
+  consumed via the [`emvault`](https://github.com/gmikeska/emvault) facade.
+- Browser device drivers (the app's, not the crates'): `@trezor/connect@9` and the
+  vendored [`@emvault/jade`](https://github.com/gmikeska/emvault-jade) — see
+  `emvault_design/jade-integration.md`.
+- Contrasting integration — **server-side autonomous** signing with HSMs (no
+  browser, no proposal lifecycle):
+  [`test-app-pkcs11`](https://github.com/gmikeska/test-app-pkcs11) and its
+  `FEATURES.md`. Same `emvault-core` descriptor/PSBT primitives, a different
+  `Signer` backend.

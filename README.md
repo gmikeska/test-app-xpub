@@ -49,22 +49,22 @@ The EmVault Rust library is linked **directly** into the Axum binary —
 there is no separate signing service, no WASM, no proxy. Trezor only
 talks to the browser; the backend never sees the device.
 
-## Feature guide
+## Crate integration guide
 
-For an exhaustive, developer-oriented walkthrough of **every** feature —
-hardware-wallet onboarding, in-UI federation creation, the per-federation
-BDK wallet, the full proposal signing lifecycle, the Trezor multisig
-signing protocol, federation migration and lineage, relay sweeps,
-spendable-now reservations, the configuration surface, and a "where do I
-start?" map of key functions and routes — see
+For a developer-oriented walkthrough of **how this app consumes the EmVault
+crates** — `ExternalSigner` onboarding, `build_federation`, the `chain_sync`
+wallet/birthday, the device-agnostic `core::psbt` signing pipeline (Trezor *and*
+Jade), `roster`-driven migration, and `emvault::config` — see
 **[`FEATURES.md`](FEATURES.md)**.
 
-`FEATURES.md` is written as an AI/human developer-ergonomics reference:
-every capability is cross-linked to the source symbol that implements it
-(`src/file.rs::symbol`) so you can learn the app quickly and jump
-straight to the code. It also documents features added since this README
-was written (in-UI federation creation, migration, and relay). This
-README is the quick-start; `FEATURES.md` is the deep reference.
+`FEATURES.md` is the **reference integration** for
+[`emvault-xpub`](https://github.com/gmikeska/emvault-xpub) +
+[`emvault-core`](https://github.com/gmikeska/emvault-core): for each library
+capability it shows the exact API the app calls and where
+(`src/file.rs::symbol` ↔ `emvault::…::symbol`), so AI/human developers can learn
+*how to integrate the crates*. It deliberately covers the app↔crate boundary, not
+the UI, routes, templates, or DB schema. This README is the quick-start;
+`FEATURES.md` is the deep integration reference.
 
 ## Prerequisites
 
