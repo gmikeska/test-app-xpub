@@ -67,6 +67,13 @@ function assertNetwork(network) {
 
 export class JadeRpc {
     /**
+     * Opt-in diagnostic logging. Off by default so the library is silent in
+     * consumers' consoles; set `JadeRpc.debug = true` to surface read-loop /
+     * decode warnings while troubleshooting.
+     */
+    static debug = false;
+
+    /**
      * Open a Web Serial port and wrap it in a `JadeRpc`. The user agent
      * will surface a port picker; this must be called from within a user
      * gesture (click handler, etc).
@@ -124,7 +131,7 @@ export class JadeRpc {
             // `cancel()` from `close()` triggers an AbortError here. Real
             // transport errors should fail any pending RPCs.
             if (!this._closed) {
-                console.error("[jade] read loop error:", e);
+                if (JadeRpc.debug) console.error("[jade] read loop error:", e);
                 for (const { reject } of this._inflight.values()) {
                     reject(e instanceof Error ? e : new Error(String(e)));
                 }
@@ -150,7 +157,13 @@ export class JadeRpc {
                     // Incomplete; wait for more bytes.
                     return;
                 }
-                console.error("[jade] decode error:", e, this._buffer);
+                if (JadeRpc.debug) console.error("[jade] decode error:", e, this._buffer);
+                // A corrupt frame desyncs the stream — fail pending RPCs with a
+                // clear error rather than leaving callers hung, then resync.
+                for (const { reject } of this._inflight.values()) {
+                    reject(e instanceof Error ? e : new Error(String(e)));
+                }
+                this._inflight.clear();
                 this._buffer = new Uint8Array(0);
                 return;
             }
@@ -168,7 +181,7 @@ export class JadeRpc {
         const id = String(msg.id);
         const pending = this._inflight.get(id);
         if (!pending) {
-            console.warn("[jade] reply for unknown id", id, msg);
+            if (JadeRpc.debug) console.warn("[jade] reply for unknown id", id, msg);
             return;
         }
         this._inflight.delete(id);
@@ -200,6 +213,12 @@ export class JadeRpc {
     async close() {
         if (this._closed) return;
         this._closed = true;
+        // Fail any in-flight RPCs so callers awaiting a reply don't hang forever
+        // when the port is closed (or the device is unplugged) mid-call.
+        for (const { reject } of this._inflight.values()) {
+            reject(new Error("JadeRpc: port closed"));
+        }
+        this._inflight.clear();
         try {
             await this._reader.cancel();
         } catch (_e) { /* ignore */ }
