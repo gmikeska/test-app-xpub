@@ -1,8 +1,8 @@
-// Blockstream Jade WebSerial driver for Bitcoin (and Liquid) workflows.
+// Blockstream Jade WebSerial driver for Bitcoin workflows.
 //
-// `lwk_wasm`'s `Jade` only exposes `sign(pset)` for Liquid; it has no
-// Bitcoin `sign_psbt` entry point. For test-app-xpub's Bitcoin federations
-// we therefore drive Jade's CBOR-RPC protocol directly over WebSerial.
+// Drives Jade's CBOR-RPC protocol directly over WebSerial to onboard the
+// device and sign Bitcoin PSBTs — the xpub / fingerprint / multisig
+// registration / `sign_psbt` surface needed for Bitcoin federations.
 //
 // Wire format: CBOR objects sent back-to-back over the serial port at
 // 115200 baud. Each request carries a unique `id`; replies echo it. See
@@ -11,11 +11,11 @@
 // Public surface:
 //
 //   const jade = await JadeRpc.fromSerial();
-//   await jade.unlock("regtest");                    // auth handshake.
-//   const xpub = await jade.getXpub("regtest", "m/48'/1'/0'/2'");
-//   const fp   = await jade.getMasterFingerprintHex();
-//   await jade.registerMultisig("regtest", "ast123", multisigFileText);
-//   const signedPsbtB64 = await jade.signPsbt("regtest", basePsbtB64);
+//   await jade.unlock("localtest");                  // auth handshake.
+//   const xpub = await jade.getXpub("localtest", "m/48'/1'/0'/2'");
+//   const fp   = await jade.getMasterFingerprintHex("localtest");
+//   await jade.registerMultisig("localtest", "ast123", multisigFileText);
+//   const signedPsbt = await jade.signPsbt("localtest", basePsbtBytes);
 //   await jade.close();
 //
 // All public methods that touch the device are async. After `unlock`
@@ -45,6 +45,25 @@ const PINSERVER_URL_PREFIXES = [
 // BIP-32 hardened-derivation mask. JS bitwise ops are 32-bit signed, so
 // we reach for the literal value instead of `(1 << 31)`.
 const HARDENED_MASK = 0x80000000;
+
+// Canonical Jade Bitcoin network identifiers. Jade firmware rejects anything
+// else, so we validate up front and fail with a clear message rather than
+// letting the device return an opaque error. Note: Bitcoin regtest is
+// `localtest` (NOT `regtest`) — the name most people get wrong.
+export const NETWORKS = Object.freeze([
+    "mainnet", // Bitcoin mainnet
+    "testnet", // Bitcoin testnet (also used for signet)
+    "localtest", // Bitcoin regtest
+]);
+
+function assertNetwork(network) {
+    if (!NETWORKS.includes(network)) {
+        throw new Error(
+            `Jade: unknown network ${JSON.stringify(network)}. ` +
+                `Valid values: ${NETWORKS.join(", ")}.`,
+        );
+    }
+}
 
 export class JadeRpc {
     /// Open a Web Serial port and wrap it in a `JadeRpc`. The user agent
@@ -201,9 +220,10 @@ export class JadeRpc {
     /// pinserver. On an already-authenticated session (rare in browsers
     /// since closing the port locks Jade) it returns immediately.
     ///
-    /// @param {string} network "mainnet" | "testnet" | "regtest" | "liquid"
-    ///                         | "liquidtestnet" | "localtest-liquid"
+    /// @param {string} network one of `NETWORKS`: "mainnet" | "testnet" |
+    ///                         "localtest"
     async unlock(network) {
+        assertNetwork(network);
         let reply = await this._call("auth_user", {
             network,
             epoch: Math.floor(Date.now() / 1000),
@@ -262,6 +282,7 @@ export class JadeRpc {
     /// Fetch the xpub at `path` (a BIP-32 path string or array). `network`
     /// must match what `unlock` was called with.
     async getXpub(network, path) {
+        assertNetwork(network);
         const u32Path = pathToU32Array(path);
         const reply = await this._call("get_xpub", {
             network,
@@ -286,24 +307,6 @@ export class JadeRpc {
         return bytesToHex(fp);
     }
 
-    /// Fetch Jade's SLIP-77 **master blinding key** (32 bytes) — needed to
-    /// build a single-sig confidential descriptor
-    /// `ct(slip77(<hex>), elwpkh(...))` so a Liquid PSET can be blinded such
-    /// that Jade can unblind and sign it. The user confirms the export on the
-    /// device. Returns a `Uint8Array(32)`.
-    async getMasterBlindingKey() {
-        const reply = await this._call("get_master_blinding_key", {});
-        const key = reply.result;
-        if (!(key instanceof Uint8Array) || key.length !== 32) {
-            throw new Error(
-                `Jade: expected 32-byte master blinding key, got ${
-                    key instanceof Uint8Array ? `${key.length} bytes` : typeof key
-                }`,
-            );
-        }
-        return key;
-    }
-
     /// Register a multisig wallet on the device. Accepts either the
     /// "multisig_file" form (a Coldcard/Sparrow-style text export, as a
     /// `string`) or the "descriptor object" form (a plain JS object that
@@ -316,6 +319,7 @@ export class JadeRpc {
     /// @param {string} name 1..15 ASCII chars.
     /// @param {string | object} fileOrDescriptor
     async registerMultisig(network, name, fileOrDescriptor) {
+        assertNetwork(network);
         if (typeof name !== "string" || name.length === 0 || name.length >= 16) {
             throw new Error(
                 `Jade: multisig name must be 1..15 ASCII chars (got ${JSON.stringify(name)})`,
@@ -344,57 +348,8 @@ export class JadeRpc {
         return this._signTxLike("sign_psbt", network, psbtBytes, "psbt");
     }
 
-    /// Ask Jade to sign a Liquid PSET. Mirrors `signPsbt` but uses Jade's
-    /// `sign_pset` RPC method so the device knows it's looking at Elements
-    /// transaction bytes (different magic, different sighash logic).
-    ///
-    /// `psetBytes` is the binary PSET (`Uint8Array`); the reply is the
-    /// signed PSET as `Uint8Array`. Same `seqlen`/`get_extended_data`
-    /// chunking applies — Liquid PSETs are usually larger than Bitcoin
-    /// PSBTs because of the rangeproofs and asset commitments.
-    async signPset(network, psetBytes) {
-        return this._signTxLike("sign_pset", network, psetBytes, "pset");
-    }
-
-    /// Register a Liquid multisig wallet on the device. Same shape as
-    /// `registerMultisig` but with the SLIP-77 master blinding key bound
-    /// to the descriptor — Jade needs it to recreate the per-output
-    /// blinding factors when validating PSET signing requests. The user
-    /// must physically confirm the registration on the Jade screen.
-    /// Idempotent under the same `(name, content)` pair.
-    ///
-    /// @param {string} network "liquid" | "liquidtestnet" | "localtest-liquid"
-    /// @param {string} name 1..15 ASCII chars.
-    /// @param {object} descriptor Jade descriptor object (must include
-    ///                            `variant`, `sorted`, `threshold`,
-    ///                            `signers`, and `master_blinding_key`).
-    async registerLiquidMultisig(network, name, descriptor) {
-        if (typeof name !== "string" || name.length === 0 || name.length >= 16) {
-            throw new Error(
-                `Jade: multisig name must be 1..15 ASCII chars (got ${JSON.stringify(name)})`,
-            );
-        }
-        if (!descriptor || typeof descriptor !== "object") {
-            throw new TypeError("registerLiquidMultisig: descriptor must be an object");
-        }
-        if (!(descriptor.master_blinding_key instanceof Uint8Array)) {
-            throw new TypeError(
-                "registerLiquidMultisig: descriptor.master_blinding_key must be a 32-byte Uint8Array",
-            );
-        }
-        if (descriptor.master_blinding_key.length !== 32) {
-            throw new RangeError(
-                `registerLiquidMultisig: master_blinding_key must be 32 bytes (got ${descriptor.master_blinding_key.length})`,
-            );
-        }
-        await this._call("register_multisig", {
-            network,
-            multisig_name: name,
-            descriptor,
-        });
-    }
-
     async _signTxLike(method, network, txBytes, paramName) {
+        assertNetwork(network);
         if (!(txBytes instanceof Uint8Array)) {
             throw new TypeError(`${method}: ${paramName}Bytes must be Uint8Array`);
         }
@@ -484,19 +439,85 @@ const BASE58_INDEX = (() => {
 })();
 
 /// Decode a base58-check string into its payload (without the trailing
-/// 4-byte checksum). Throws on malformed input or checksum mismatch.
+/// 4-byte checksum). Verifies the SHA-256d checksum and throws on malformed
+/// input or checksum mismatch — a corrupted device xpub must not slip through
+/// on a custody path.
 export function base58CheckDecode(s) {
     const decoded = base58Decode(s);
     if (decoded.length < 4) throw new Error("base58check: input too short");
     const payload = decoded.subarray(0, decoded.length - 4);
     const claimed = decoded.subarray(decoded.length - 4);
-    // Skip checksum verification: it would require SHA256, which is in
-    // SubtleCrypto but only via async APIs that don't fit the sync shape
-    // here. The bytes immediately get fed into the federation builder,
-    // which will reject malformed xpubs at the BIP-32 layer if anything
-    // is off. Loud assertion below silences the unused-var lint.
-    void claimed;
+    const digest = sha256(sha256(payload)); // base58check uses double SHA-256
+    if (
+        digest[0] !== claimed[0] || digest[1] !== claimed[1] ||
+        digest[2] !== claimed[2] || digest[3] !== claimed[3]
+    ) {
+        throw new Error("base58check: checksum mismatch");
+    }
     return payload;
+}
+
+// Minimal synchronous SHA-256 (FIPS 180-4). Dependency-free by design; used
+// only to verify the base58check checksum. `SubtleCrypto` is async-only, which
+// doesn't fit these sync decode helpers, so we implement the ~60 lines here.
+const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256(msg) {
+    const h = new Uint32Array([
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ]);
+    const bitLen = msg.length * 8;
+    const total = (((msg.length + 8) >> 6) + 1) << 6; // pad to 64-byte blocks
+    const buf = new Uint8Array(total);
+    buf.set(msg);
+    buf[msg.length] = 0x80;
+    const dv = new DataView(buf.buffer);
+    dv.setUint32(total - 8, Math.floor(bitLen / 0x100000000), false);
+    dv.setUint32(total - 4, bitLen >>> 0, false);
+
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    const w = new Uint32Array(64);
+    for (let off = 0; off < total; off += 64) {
+        for (let t = 0; t < 16; t += 1) w[t] = dv.getUint32(off + t * 4, false);
+        for (let t = 16; t < 64; t += 1) {
+            const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+            const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+            w[t] = (w[t - 16] + s0 + w[t - 7] + s1) >>> 0;
+        }
+        let a = h[0], b = h[1], c = h[2], d = h[3];
+        let e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (let t = 0; t < 64; t += 1) {
+            const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const ch = (e & f) ^ (~e & g);
+            const t1 = (hh + S1 + ch + SHA256_K[t] + w[t]) >>> 0;
+            const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const maj = (a & b) ^ (a & c) ^ (b & c);
+            const t2 = (S0 + maj) >>> 0;
+            hh = g; g = f; f = e; e = (d + t1) >>> 0;
+            d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+        }
+        h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0;
+        h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+        h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0;
+        h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+    }
+    const out = new Uint8Array(32);
+    const odv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i += 1) odv.setUint32(i * 4, h[i], false);
+    return out;
 }
 
 function base58Decode(s) {
