@@ -66,12 +66,14 @@ function assertNetwork(network) {
 }
 
 export class JadeRpc {
-    /// Open a Web Serial port and wrap it in a `JadeRpc`. The user agent
-    /// will surface a port picker; this must be called from within a user
-    /// gesture (click handler, etc).
-    ///
-    /// @param {{ filter?: boolean }} options
-    /// @returns {Promise<JadeRpc>}
+    /**
+     * Open a Web Serial port and wrap it in a `JadeRpc`. The user agent
+     * will surface a port picker; this must be called from within a user
+     * gesture (click handler, etc).
+     *
+     * @param {{ filter?: boolean }} options
+     * @returns {Promise<JadeRpc>}
+     */
     static async fromSerial({ filter = true } = {}) {
         if (!("serial" in navigator)) {
             throw new Error(
@@ -190,7 +192,11 @@ export class JadeRpc {
         return promise;
     }
 
-    /// Release the WebSerial port. Idempotent.
+    /**
+     * Release the WebSerial port. Idempotent. Teardown errors (reader cancel,
+     * writer/port close) are intentionally swallowed — a best-effort release —
+     * so callers can always `await close()` without a try/catch.
+     */
     async close() {
         if (this._closed) return;
         this._closed = true;
@@ -213,15 +219,17 @@ export class JadeRpc {
 
     // -- Public RPC surface --
 
-    /// Trigger Jade's auth handshake against Blockstream's pinserver.
-    ///
-    /// On a freshly-connected device this prompts for the PIN on the
-    /// Jade screen and runs a multi-round PKE handshake with the
-    /// pinserver. On an already-authenticated session (rare in browsers
-    /// since closing the port locks Jade) it returns immediately.
-    ///
-    /// @param {string} network one of `NETWORKS`: "mainnet" | "testnet" |
-    ///                         "localtest"
+    /**
+     * Trigger Jade's auth handshake against Blockstream's pinserver.
+     *
+     * On a freshly-connected device this prompts for the PIN on the
+     * Jade screen and runs a multi-round PKE handshake with the
+     * pinserver. On an already-authenticated session (rare in browsers
+     * since closing the port locks Jade) it returns immediately.
+     *
+     * @param {string} network one of `NETWORKS`: "mainnet" | "testnet" |
+     *                         "localtest"
+     */
     async unlock(network) {
         assertNetwork(network);
         let reply = await this._call("auth_user", {
@@ -259,11 +267,23 @@ export class JadeRpc {
             if (typeof onReply !== "string") {
                 throw new Error("Jade auth: missing http_request.on-reply method name");
             }
-            const httpResp = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(params.data),
-            });
+            let httpResp;
+            try {
+                httpResp = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(params.data),
+                });
+            } catch (e) {
+                // fetch() rejects (TypeError) on a network failure or a CORS
+                // block before any response — distinguish that from a pinserver
+                // that answered with an error status (handled below).
+                throw new Error(
+                    `Jade auth: could not reach the pinserver at ${url} ` +
+                        `(network error or CORS block). Ensure the app origin is ` +
+                        `allowed to POST to it. Cause: ${(e && e.message) || e}`,
+                );
+            }
             if (!httpResp.ok) {
                 throw new Error(
                     `Jade pinserver POST ${url} failed: ${httpResp.status} ${httpResp.statusText}`,
@@ -279,8 +299,10 @@ export class JadeRpc {
         }
     }
 
-    /// Fetch the xpub at `path` (a BIP-32 path string or array). `network`
-    /// must match what `unlock` was called with.
+    /**
+     * Fetch the xpub at `path` (a BIP-32 path string or array). `network`
+     * must match what `unlock` was called with.
+     */
     async getXpub(network, path) {
         assertNetwork(network);
         const u32Path = pathToU32Array(path);
@@ -291,12 +313,19 @@ export class JadeRpc {
         return reply.result;
     }
 
-    /// Fetch the master fingerprint as a lowercase hex string. Implemented
-    /// by asking Jade for the xpub at `m/0` and reading the returned
-    /// xpub's `parent_fingerprint` field (bytes 5..9 of the 78-byte BIP-32
-    /// payload), which is the master fingerprint by definition.
-    ///
-    /// @param {string} network see `unlock`.
+    /**
+     * Fetch the master fingerprint as a lowercase hex string. Implemented
+     * by asking Jade for the xpub at `m/0` and reading the returned
+     * xpub's `parent_fingerprint` field (bytes 5..9 of the 78-byte BIP-32
+     * payload), which is the master fingerprint by definition.
+     *
+     * `network` is required because the fingerprint is read from a device
+     * `get_xpub` call (at `m/0`), which is network-scoped — even though the
+     * master fingerprint value itself is network-independent. Pass the same
+     * `network` you used for `unlock`.
+     *
+     * @param {string} network see `unlock`.
+     */
     async getMasterFingerprintHex(network) {
         const xpub = await this.getXpub(network, [0]);
         const payload = base58CheckDecode(xpub);
@@ -307,17 +336,19 @@ export class JadeRpc {
         return bytesToHex(fp);
     }
 
-    /// Register a multisig wallet on the device. Accepts either the
-    /// "multisig_file" form (a Coldcard/Sparrow-style text export, as a
-    /// `string`) or the "descriptor object" form (a plain JS object that
-    /// maps directly onto Jade's `params.descriptor` CBOR map). The user
-    /// must physically confirm the registration on the Jade screen.
-    /// Idempotent under the same `(name, content)` pair; differing
-    /// content under the same name overwrites.
-    ///
-    /// @param {string} network
-    /// @param {string} name 1..15 ASCII chars.
-    /// @param {string | object} fileOrDescriptor
+    /**
+     * Register a multisig wallet on the device. Accepts either the
+     * "multisig_file" form (a Coldcard/Sparrow-style text export, as a
+     * `string`) or the "descriptor object" form (a plain JS object that
+     * maps directly onto Jade's `params.descriptor` CBOR map). The user
+     * must physically confirm the registration on the Jade screen.
+     * Idempotent under the same `(name, content)` pair; differing
+     * content under the same name overwrites.
+     *
+     * @param {string} network
+     * @param {string} name 1..15 ASCII chars.
+     * @param {string | object} fileOrDescriptor
+     */
     async registerMultisig(network, name, fileOrDescriptor) {
         assertNetwork(network);
         if (typeof name !== "string" || name.length === 0 || name.length >= 16) {
@@ -338,12 +369,14 @@ export class JadeRpc {
         await this._call("register_multisig", params);
     }
 
-    /// Ask Jade to sign a Bitcoin PSBT.
-    ///
-    /// `psbtBytes` is the binary PSBT (`Uint8Array`); the reply is the
-    /// signed PSBT as `Uint8Array`. Large PSBTs may come back in multiple
-    /// `seqlen` chunks — we transparently follow up with
-    /// `get_extended_data` calls and concatenate.
+    /**
+     * Ask Jade to sign a Bitcoin PSBT.
+     *
+     * `psbtBytes` is the binary PSBT (`Uint8Array`); the reply is the
+     * signed PSBT as `Uint8Array`. Large PSBTs may come back in multiple
+     * `seqlen` chunks — we transparently follow up with
+     * `get_extended_data` calls and concatenate.
+     */
     async signPsbt(network, psbtBytes) {
         return this._signTxLike("sign_psbt", network, psbtBytes, "psbt");
     }
@@ -401,8 +434,10 @@ export class JadeRpc {
 
 // -- Helpers ---------------------------------------------------------------
 
-/// Convert a BIP-32 path (`"m/48'/1'/0'/2'"` or already-an-array) into a
-/// flat `Uint32Array`-shaped JS array of u32s with the hardened bit set.
+/**
+ * Convert a BIP-32 path (`"m/48'/1'/0'/2'"` or already-an-array) into a
+ * flat `Uint32Array`-shaped JS array of u32s with the hardened bit set.
+ */
 export function pathToU32Array(path) {
     if (Array.isArray(path)) return path.map((n) => Number(n) >>> 0);
     if (typeof path !== "string") {
@@ -438,10 +473,12 @@ const BASE58_INDEX = (() => {
     return out;
 })();
 
-/// Decode a base58-check string into its payload (without the trailing
-/// 4-byte checksum). Verifies the SHA-256d checksum and throws on malformed
-/// input or checksum mismatch — a corrupted device xpub must not slip through
-/// on a custody path.
+/**
+ * Decode a base58-check string into its payload (without the trailing
+ * 4-byte checksum). Verifies the SHA-256d checksum and throws on malformed
+ * input or checksum mismatch — a corrupted device xpub must not slip through
+ * on a custody path.
+ */
 export function base58CheckDecode(s) {
     const decoded = base58Decode(s);
     if (decoded.length < 4) throw new Error("base58check: input too short");
@@ -561,8 +598,10 @@ export function bytesToHex(bytes) {
     return s;
 }
 
-/// Decode an even-length hex string into `Uint8Array`. Throws on
-/// non-hex characters.
+/**
+ * Decode an even-length hex string into `Uint8Array`. Throws on
+ * non-hex characters.
+ */
 export function hexToBytes(hex) {
     if (typeof hex !== "string" || (hex.length & 1) !== 0) {
         throw new Error(`hexToBytes: expected even-length hex string, got ${hex}`);
@@ -578,8 +617,10 @@ export function hexToBytes(hex) {
     return out;
 }
 
-/// Decode a base64 string into a `Uint8Array`. Accepts URL-safe and
-/// padded variants. Throws on invalid characters.
+/**
+ * Decode a base64 string into a `Uint8Array`. Accepts URL-safe and
+ * padded variants. Throws on invalid characters.
+ */
 export function base64ToBytes(b64) {
     const cleaned = b64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
     const binary = atob(cleaned);
@@ -590,7 +631,9 @@ export function base64ToBytes(b64) {
     return out;
 }
 
-/// Encode `Uint8Array` → standard base64 string.
+/**
+ * Encode `Uint8Array` → standard base64 string.
+ */
 export function bytesToBase64(bytes) {
     let binary = "";
     for (let i = 0; i < bytes.length; i += 1) {

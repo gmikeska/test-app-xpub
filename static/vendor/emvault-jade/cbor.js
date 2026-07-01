@@ -386,10 +386,12 @@ function halfPrecisionToFloat(u) {
     return sign * Math.pow(2, exp - 15) * (1 + mant / 1024);
 }
 
-/// Decode the first complete CBOR item from `bytes`. Returns
-/// `{ value, length }` where `length` is the number of bytes consumed.
-/// Throws `RangeError` if `bytes` does not contain a complete item — the
-/// caller should buffer more data and retry.
+/**
+ * Decode the first complete CBOR item from `bytes`. Returns
+ * `{ value, length }` where `length` is the number of bytes consumed.
+ * Throws `RangeError` if `bytes` does not contain a complete item — the
+ * caller should buffer more data and retry.
+ */
 export function decode(bytes) {
     const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     const s = new DecoderState(u8);
