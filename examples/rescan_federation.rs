@@ -70,7 +70,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--from" => {
                 let v = it.next().ok_or("--from requires a <height>")?;
-                from_height = v.parse().map_err(|e| format!("invalid --from height: {e}"))?;
+                from_height = v
+                    .parse()
+                    .map_err(|e| format!("invalid --from height: {e}"))?;
             }
             "--help" | "-h" => {
                 print_usage();

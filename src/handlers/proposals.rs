@@ -14,9 +14,9 @@
 //! mismatch. Membership-gated; only `federation_members` of the proposal's
 //! federation may act on it.
 
+use emvault::core::bitcoin;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use emvault::core::bitcoin;
 
 use askama::Template;
 use askama_web::WebTemplate;

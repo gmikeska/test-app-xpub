@@ -29,17 +29,21 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use emvault::config::{hex_decode, hex_encode};
 use emvault::core::bdk_bitcoind_rpc::{Emitter, NO_EXPECTED_MEMPOOL_TXS};
 use emvault::core::bdk_wallet::chain::{BlockId, ChainPosition, Merge};
-use emvault::core::bdk_wallet::{self, AddressInfo, ChangeSet, KeychainKind, SignOptions, Update, Wallet};
+use emvault::core::bdk_wallet::{
+    self, AddressInfo, ChangeSet, KeychainKind, SignOptions, Update, Wallet,
+};
 use emvault::core::bitcoin::address::NetworkUnchecked;
 use emvault::core::bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub};
 use emvault::core::bitcoin::consensus::Encodable;
 use emvault::core::bitcoin::ecdsa::Signature as EcdsaSignature;
 use emvault::core::bitcoin::sighash::EcdsaSighashType;
-use emvault::core::bitcoin::{self, Address, Amount, FeeRate, Network, Psbt, PublicKey, ScriptBuf, Transaction, Txid};
+use emvault::core::bitcoin::{
+    self, Address, Amount, FeeRate, Network, Psbt, PublicKey, ScriptBuf, Transaction, Txid,
+};
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
-use emvault::config::{hex_decode, hex_encode};
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
 use emvault::core::error::PsbtError;
 use emvault::core::psbt as core_psbt;
@@ -489,9 +493,10 @@ impl WalletManager {
                 .rpc
                 .get_block_hash(u64::from(from_height))
                 .map_err(WalletError::Rpc)?;
-            let cp = wallet
-                .latest_checkpoint()
-                .insert(BlockId { height: from_height, hash });
+            let cp = wallet.latest_checkpoint().insert(BlockId {
+                height: from_height,
+                hash,
+            });
             wallet
                 .apply_update(Update {
                     chain: Some(cp),
