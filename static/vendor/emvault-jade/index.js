@@ -5,7 +5,7 @@
 // PSBT signing and full device onboarding (xpub, master fingerprint, multisig
 // registration).
 //
-//   import { JadeRpc } from "@emvault/jade";
+//   import { JadeRpc } from "@emeraldlabs/emvault-jade";
 //
 //   const jade = await JadeRpc.fromSerial();       // inside a click handler
 //   await jade.unlock("testnet");
