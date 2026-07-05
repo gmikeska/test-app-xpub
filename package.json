@@ -1,0 +1,16 @@
+{
+  "name": "test-app-xpub-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Vite build for test-app-xpub's client modules (bundles @emeraldlabs/emvault-jade).",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "@emeraldlabs/emvault-jade": "^0.1.0"
+  },
+  "devDependencies": {
+    "vite": "^5"
+  }
+}

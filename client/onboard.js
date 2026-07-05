@@ -27,7 +27,7 @@
  * vendored `@emvault/jade` driver — unlock → getXpub → assemble the same
  * BIP-380 descriptor key — and POSTs it with `device_type:"Jade"`.
  */
-import { JadeRpc } from "/static/vendor/emvault-jade/index.js";
+import { JadeRpc } from "@emeraldlabs/emvault-jade";
 
 (function () {
   "use strict";

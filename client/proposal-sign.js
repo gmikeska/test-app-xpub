@@ -29,7 +29,7 @@ import {
   pathToU32Array,
   base64ToBytes,
   bytesToBase64,
-} from "/static/vendor/emvault-jade/index.js";
+} from "@emeraldlabs/emvault-jade";
 
 (function () {
   "use strict";
