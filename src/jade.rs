@@ -18,7 +18,6 @@
 //! See `emvault_design/jade-integration.md` §3 for the mapping rationale.
 
 use serde::Serialize;
-use uuid::Uuid;
 
 use crate::models::SignerRow;
 
@@ -67,26 +66,49 @@ pub enum JadeRegisterError {
     NoSigners,
 }
 
-/// Deterministic, device-safe (1–15 ASCII) Jade wallet name for a federation:
-/// `ev` + the first 12 hex chars of the (dash-stripped) federation UUID = 14
-/// chars. Stable across calls so re-registration is idempotent on-device.
+/// Device-safe (1–15 ASCII) Jade wallet name for a federation **version**:
+/// `{label}-v{version}`, with `version` 1-indexed (so `version_index` `0` → `v1`).
+///
+/// The lineage `label` is capped at 10 chars at creation (see the federation
+/// create handler); here it is additionally sanitized to ASCII alphanumerics
+/// and truncated so the whole name always fits Jade's 15-char limit
+/// (`label ≤10` + `-v` + up to 3 version digits = ≤15), even for legacy rows
+/// whose label predates the cap. Versioning the name means a new federation
+/// version registers under a **new** on-device name instead of overwriting the
+/// prior version's descriptor — old registrations stay intact.
 #[must_use]
-pub fn jade_reg_name(federation_id: Uuid) -> String {
-    let hex = federation_id.simple().to_string(); // 32 lowercase hex, no dashes
-    format!("ev{}", &hex[..12])
+pub fn jade_reg_name(label: &str, version_index: i32) -> String {
+    let version = version_index.saturating_add(1);
+    let version_str = version.to_string();
+    // Reserve room for "-v" + the version digits so the total stays ≤ 15.
+    let max_base = 15usize.saturating_sub(2 + version_str.len()).min(10);
+    let base: String = label
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(max_base)
+        .collect();
+    let base = if base.is_empty() {
+        "fed".to_string()
+    } else {
+        base
+    };
+    format!("{base}-v{version_str}")
 }
 
 /// Build a [`JadeRegister`] from a federation's member signer rows.
 ///
-/// `cosigners` are the federation members' [`SignerRow`]s (any device type —
-/// Jade only needs the public key-origin data). `threshold` is the federation's
-/// `m`. Produces a `wsh(sortedmulti(m, ...))` registration.
+/// `label` and `version_index` name the on-device registration
+/// (`{label}-v{version_index + 1}`, see [`jade_reg_name`]). `cosigners` are the
+/// federation members' [`SignerRow`]s (any device type — Jade only needs the
+/// public key-origin data). `threshold` is the federation's `m`. Produces a
+/// `wsh(sortedmulti(m, ...))` registration.
 ///
 /// # Errors
 /// [`JadeRegisterError`] if there are no signers or the threshold is out of
 /// range for the signer count.
 pub fn build_jade_register(
-    federation_id: Uuid,
+    label: &str,
+    version_index: i32,
     threshold: i32,
     cosigners: &[SignerRow],
 ) -> Result<JadeRegister, JadeRegisterError> {
@@ -114,7 +136,7 @@ pub fn build_jade_register(
         .collect();
 
     Ok(JadeRegister {
-        name: jade_reg_name(federation_id),
+        name: jade_reg_name(label, version_index),
         variant: "wsh(multi(k))",
         sorted: true,
         threshold: threshold_u32,
@@ -126,6 +148,7 @@ pub fn build_jade_register(
 mod tests {
     use super::*;
     use chrono::Utc;
+    use uuid::Uuid;
 
     fn signer(fp: &str, xpub: &str) -> SignerRow {
         SignerRow {
@@ -143,25 +166,32 @@ mod tests {
     }
 
     #[test]
-    fn reg_name_is_device_safe() {
-        let name = jade_reg_name(Uuid::nil());
-        assert_eq!(name, "ev000000000000");
-        assert!(!name.is_empty() && name.len() <= 15, "1..15 ASCII");
-        assert!(name.is_ascii());
+    fn reg_name_is_versioned_and_device_safe() {
+        // 1-indexed version from the 0-indexed version_index.
+        assert_eq!(jade_reg_name("Federation", 0), "Federation-v1");
+        assert_eq!(jade_reg_name("Federation", 1), "Federation-v2");
+        // Non-alphanumerics are stripped (e.g. a legacy label with spaces).
+        assert_eq!(jade_reg_name("My Fed!", 1), "MyFed-v2");
+        // Every result stays within Jade's 1..15 ASCII limit.
+        for (label, vi) in [("Federation", 0), ("Federation", 998), ("", 0)] {
+            let name = jade_reg_name(label, vi);
+            assert!(!name.is_empty() && name.len() <= 15, "{name:?} must be 1..15");
+            assert!(name.is_ascii());
+        }
+        // Empty/blank label falls back rather than producing a bare "-v1".
+        assert_eq!(jade_reg_name("", 0), "fed-v1");
         // Stable across calls.
-        let id = Uuid::new_v4();
-        assert_eq!(jade_reg_name(id), jade_reg_name(id));
+        assert_eq!(jade_reg_name("Federation", 2), jade_reg_name("Federation", 2));
     }
 
     #[test]
     fn builds_sorted_wsh_registration() {
-        let fed = Uuid::new_v4();
         let cosigners = vec![
             signer("8c9b54d0", "tpubAAAA"),
             signer("11223344", "tpubBBBB"),
             signer("aabbccdd", "tpubCCCC"),
         ];
-        let reg = build_jade_register(fed, 2, &cosigners).unwrap();
+        let reg = build_jade_register("Federation", 0, 2, &cosigners).unwrap();
         assert_eq!(reg.variant, "wsh(multi(k))");
         assert!(reg.sorted);
         assert_eq!(reg.threshold, 2);
@@ -169,23 +199,22 @@ mod tests {
         assert_eq!(reg.signers[0].fingerprint, "8c9b54d0");
         assert_eq!(reg.signers[0].derivation_path, "m/48'/1'/0'/2'");
         assert_eq!(reg.signers[2].xpub, "tpubCCCC");
-        assert_eq!(reg.name, jade_reg_name(fed));
+        assert_eq!(reg.name, "Federation-v1");
     }
 
     #[test]
     fn rejects_bad_threshold_and_empty() {
-        let fed = Uuid::new_v4();
         let one = vec![signer("8c9b54d0", "tpubAAAA")];
         assert!(matches!(
-            build_jade_register(fed, 0, &one),
+            build_jade_register("Fed", 0, 0, &one),
             Err(JadeRegisterError::BadThreshold { .. })
         ));
         assert!(matches!(
-            build_jade_register(fed, 2, &one), // m > n
+            build_jade_register("Fed", 0, 2, &one), // m > n
             Err(JadeRegisterError::BadThreshold { .. })
         ));
         assert!(matches!(
-            build_jade_register(fed, 1, &[]),
+            build_jade_register("Fed", 0, 1, &[]),
             Err(JadeRegisterError::NoSigners)
         ));
     }

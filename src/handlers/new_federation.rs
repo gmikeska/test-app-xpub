@@ -33,9 +33,12 @@ use crate::db::{self, NewFederation, UserPickerRow};
 use crate::error::AppError;
 use crate::models::SignerRow;
 
-/// Hard cap on the federation label length. The schema is `TEXT` (no
-/// limit) so this purely keeps the picker UI sane.
-const MAX_LABEL_LEN: usize = 100;
+/// Hard cap on the federation label length. The label doubles as the
+/// **FederatedWallet name**: each version registers on the Jade under
+/// `{label}-v{version}`, and Jade caps a multisig registration name at 15 ASCII
+/// chars. Reserving `-v` + up to 3 version digits leaves 10 for the label, so
+/// versions v1..v999 always fit (see [`crate::jade::jade_reg_name`]).
+const MAX_LABEL_LEN: usize = 10;
 
 // ---------------------------------------------------------------------------
 // GET /federations/new
@@ -237,6 +240,14 @@ fn sanitise_label(raw: &str) -> Result<String, AppError> {
         return Err(AppError::BadFederationInput(format!(
             "Label must be at most {MAX_LABEL_LEN} characters.",
         )));
+    }
+    // The label becomes the Jade registration name `{label}-v{version}`, which
+    // must be device- and descriptor-filename-safe. Restrict to ASCII
+    // alphanumerics so the on-device name is unambiguous and portable.
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::BadFederationInput(
+            "Label must use only letters and digits (A–Z, a–z, 0–9).".into(),
+        ));
     }
     Ok(trimmed.to_string())
 }

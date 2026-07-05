@@ -118,14 +118,10 @@ impl AppConfig {
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-xpub".to_string());
 
-        // Truthy = "1"/"true"/"yes"/"on" (case-insensitive). Missing or anything
-        // else = false, so the safe (no-overwrite) posture is the default.
-        let allow_jade_overwrite = optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        });
+        // Missing or non-truthy = false, so the safe (no-overwrite) posture is
+        // the default.
+        let allow_jade_overwrite =
+            optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| env_truthy(&v));
 
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
@@ -163,3 +159,33 @@ impl AppConfig {
 
 // `require`, `optional`, `hex_decode`, and `ConfigError` now live in
 // `emvault::config` (imported above) — deduplicated in extraction phase E5b.
+
+/// Interpret an env-var value as a boolean flag. Truthy = `1`/`true`/`yes`/`on`
+/// (case-insensitive, surrounding whitespace ignored); everything else is
+/// false. Kept as a free function so the parsing can be unit-tested without
+/// touching process-global environment state.
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_truthy;
+
+    #[test]
+    fn env_truthy_accepts_common_true_spellings() {
+        for v in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", "  true  "] {
+            assert!(env_truthy(v), "{v:?} should be truthy");
+        }
+    }
+
+    #[test]
+    fn env_truthy_rejects_everything_else() {
+        for v in ["", " ", "0", "false", "no", "off", "2", "t", "y", "enabled", "null"] {
+            assert!(!env_truthy(v), "{v:?} should be falsey");
+        }
+    }
+}

@@ -409,7 +409,7 @@ pub async fn sign_data(
 
     // Auto-route by the requesting member's onboarded device type.
     if signer.device_type == "Jade" {
-        let register = build_jade_register(federation_id, row.threshold, &cosigners)
+        let register = build_jade_register(&row.label, row.version_index, row.threshold, &cosigners)
             .map_err(|e| AppError::BadRequest(e.to_string()))?;
         return Ok(Json(SignDataResponse::Jade {
             psbt_b64: proposal.psbt_b64.clone(),
