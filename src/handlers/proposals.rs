@@ -370,6 +370,11 @@ pub struct JadeSignData {
     pub register: JadeRegister,
     /// Network argument for Jade RPCs (`unlock`/`registerMultisig`/`signPsbt`).
     pub jade_network: String,
+    /// Whether the browser may overwrite an existing same-name registration on
+    /// the device (gated by the server's `ALLOW_JADE_OVERWRITE`). Default false
+    /// keeps the safe register-once posture; the driver refuses silent
+    /// overwrites unless this is true.
+    pub allow_overwrite: bool,
 }
 
 /// `GET /federations/:id/proposals/:pid/sign-data`
@@ -411,6 +416,7 @@ pub async fn sign_data(
             jade: JadeSignData {
                 register,
                 jade_network: state.config.jade_network().to_string(),
+                allow_overwrite: state.config.allow_jade_overwrite,
             },
         })
         .into_response());

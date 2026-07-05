@@ -44,6 +44,13 @@ pub struct AppConfig {
     /// Currently unused by the BDK descriptor wallet path, but kept for
     /// future RPC calls that require a wallet context.
     pub bitcoin_wallet_name: String,
+    /// Whether the browser may **overwrite** an existing same-name Jade
+    /// multisig registration. Off unless `ALLOW_JADE_OVERWRITE` is truthy.
+    /// Safe default: the Jade driver refuses to silently replace a registration
+    /// (a hostile host could otherwise swap in an attacker descriptor). Enable
+    /// only for dev/testing where re-registering a federation under the same
+    /// name is expected.
+    pub allow_jade_overwrite: bool,
 }
 
 impl AppConfig {
@@ -111,6 +118,15 @@ impl AppConfig {
         let bitcoin_wallet_name =
             optional("BITCOIN_WALLET_NAME").unwrap_or_else(|| "emvault-xpub".to_string());
 
+        // Truthy = "1"/"true"/"yes"/"on" (case-insensitive). Missing or anything
+        // else = false, so the safe (no-overwrite) posture is the default.
+        let allow_jade_overwrite = optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -124,6 +140,7 @@ impl AppConfig {
             bitcoin_rpc_user,
             bitcoin_rpc_password,
             bitcoin_wallet_name,
+            allow_jade_overwrite,
         })
     }
 

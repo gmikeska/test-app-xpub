@@ -164,7 +164,11 @@ import {
       setStatus("Unlock the Jade (confirm PIN on the device)…");
       await jade.unlock(jadeNetwork);
       setStatus("Confirm the multisig registration on the Jade…");
-      await jade.registerMultisig(jadeNetwork, reg.name, descriptor);
+      // `allow_overwrite` is gated server-side by ALLOW_JADE_OVERWRITE (default
+      // false). When false, the driver refuses to silently replace an existing
+      // same-name registration — the safe register-once posture.
+      const allowOverwrite = (signData.jade && signData.jade.allow_overwrite) === true;
+      await jade.registerMultisig(jadeNetwork, reg.name, descriptor, { allowOverwrite });
       setStatus("Confirm the transaction on the Jade…");
       const signedBytes = await jade.signPsbt(jadeNetwork, base64ToBytes(signData.psbt_b64));
       await finishSubmit(submitUrl, { signed_psbt_b64: bytesToBase64(signedBytes) });

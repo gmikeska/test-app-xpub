@@ -8,7 +8,7 @@
     "dev": "vite build --watch"
   },
   "dependencies": {
-    "@emeraldlabs/emvault-jade": "^0.1.0"
+    "@emeraldlabs/emvault-jade": "file:../emvault-jade"
   },
   "devDependencies": {
     "vite": "^5"
