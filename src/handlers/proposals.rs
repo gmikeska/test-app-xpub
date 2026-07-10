@@ -156,6 +156,53 @@ pub async fn create(
 }
 
 // ---------------------------------------------------------------------------
+// GET /federations/:id/max-spend  (Send-Max preview)
+// ---------------------------------------------------------------------------
+
+/// Query for the Send-Max preview: the recipient (its script type affects the
+/// fee) and the fee rate.
+#[derive(Debug, Deserialize)]
+pub struct MaxSpendQuery {
+    pub recipient_address: String,
+    pub fee_rate_sat_vb: u64,
+}
+
+/// The exact net amount a Send-Max drain would deliver to the recipient
+/// (balance − network fee), as both sats and a BTC string for the form field.
+#[derive(Debug, Serialize)]
+pub struct MaxSpendResponse {
+    pub max_sat: u64,
+    pub max_btc: String,
+}
+
+/// `GET /federations/:id/max-spend` — compute (without creating a proposal or
+/// persisting anything) the net amount a "Send Max" drain to `recipient_address`
+/// would send at the given fee rate. Drives the Send tab's **Max** button.
+pub async fn max_spend(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path(federation_id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<MaxSpendQuery>,
+) -> Result<Json<MaxSpendResponse>, AppError> {
+    if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
+        return Err(AppError::Forbidden);
+    }
+    if q.fee_rate_sat_vb == 0 {
+        return Err(AppError::BadRequest(
+            "fee_rate_sat_vb must be at least 1".to_string(),
+        ));
+    }
+    let fw = state.wallets.load_or_init(federation_id).await?;
+    fw.sync().await?;
+    let address = fw.parse_address(q.recipient_address.trim())?;
+    let amount = fw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?;
+    Ok(Json(MaxSpendResponse {
+        max_sat: amount.to_sat(),
+        max_btc: format!("{:.8}", amount.to_btc()),
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // GET /federations/:id/proposals/:pid
 // ---------------------------------------------------------------------------
 

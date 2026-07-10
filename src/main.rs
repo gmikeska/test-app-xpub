@@ -165,6 +165,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::proposals::create),
         )
         .route(
+            "/federations/{id}/max-spend",
+            get(handlers::proposals::max_spend),
+        )
+        .route(
             "/federations/{id}/proposals/{pid}",
             get(handlers::proposals::detail),
         )

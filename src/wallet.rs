@@ -1164,6 +1164,46 @@ impl FederationWallet {
         self.build_migration_tx(destination, fee_rate_sat_vb).await
     }
 
+    /// Compute the exact net amount a Send-Max drain to `destination` would
+    /// deliver (balance − network fee) at `fee_rate_sat_vb`, **without** creating
+    /// a proposal or persisting anything. Drives the Send-tab "Max" button so the
+    /// amount field shows the real drain figure BDK will produce. A drain has a
+    /// single output (no change), so its value *is* the recipient's net amount.
+    ///
+    /// # Errors
+    /// Same failure modes as [`build_drain_tx`](Self::build_drain_tx) — bad fee
+    /// rate, or nothing spendable to drain.
+    pub async fn compute_drain_amount(
+        &self,
+        destination: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<Amount, WalletError> {
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
+        let mut wallet = self.inner.lock().await;
+        let psbt = {
+            let mut builder = wallet.build_tx();
+            builder
+                .drain_wallet()
+                .drain_to(destination.script_pubkey())
+                .fee_rate(fee_rate);
+            builder
+                .finish()
+                .map_err(|e| WalletError::CreateTx(e.to_string()))?
+        };
+        // Read-only preview: discard any staged delta (a drain reveals no change
+        // address, so this is normally empty) — we persist nothing.
+        let _ = wallet.take_staged();
+        let amount = psbt
+            .unsigned_tx
+            .output
+            .first()
+            .map_or(Amount::ZERO, |o| o.value);
+        Ok(amount)
+    }
+
     /// Merge a staged changeset delta into the aggregate and persist it (no-op
     /// when `delta` is `None`). Shared by the address-reveal and sweep-build
     /// paths.
