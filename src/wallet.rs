@@ -1148,6 +1148,22 @@ impl FederationWallet {
         })
     }
 
+    /// Drain the **entire** spendable balance to `destination` (the "Send Max"
+    /// flow): one input set → one output, fee paid from the swept amount.
+    /// Mechanically identical to [`build_migration_tx`](Self::build_migration_tx)
+    /// — it reuses it — but is named for the general send-max use where the
+    /// caller (not the migration lineage) chooses the destination.
+    ///
+    /// # Errors
+    /// Same as [`build_migration_tx`](Self::build_migration_tx).
+    pub async fn build_drain_tx(
+        &self,
+        destination: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<BuiltProposal, WalletError> {
+        self.build_migration_tx(destination, fee_rate_sat_vb).await
+    }
+
     /// Merge a staged changeset delta into the aggregate and persist it (no-op
     /// when `delta` is `None`). Shared by the address-reveal and sweep-build
     /// paths.

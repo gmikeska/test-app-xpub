@@ -50,6 +50,11 @@ pub struct CreateProposalForm {
     /// old-signer sends, which sweep the entire balance.
     #[serde(default)]
     pub amount_btc: Option<String>,
+    /// When set (the "Send Max" checkbox posts `"true"`), sweep the **entire**
+    /// balance to the recipient — fee deducted from the amount. Honored only
+    /// for current signers; ignored otherwise.
+    #[serde(default)]
+    pub send_max: Option<String>,
     /// Fee rate in sat/vB (regtest default = 2).
     pub fee_rate_sat_vb: u64,
     /// Optional human-readable label.
@@ -91,16 +96,23 @@ pub async fn create(
     let status =
         crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
             .await?;
+    let send_max = matches!(form.send_max.as_deref(), Some("true"));
     let built = if status.is_current_signer {
-        let amount_str = form
-            .amount_btc
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
-        let amount = parse_btc_amount(amount_str)?;
-        fw.build_proposal(&address, amount, form.fee_rate_sat_vb)
-            .await?
+        if send_max {
+            // "Send Max": sweep the entire balance to the chosen recipient,
+            // fee out of the swept amount. Reuses the proven drain builder.
+            fw.build_drain_tx(&address, form.fee_rate_sat_vb).await?
+        } else {
+            let amount_str = form
+                .amount_btc
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
+            let amount = parse_btc_amount(amount_str)?;
+            fw.build_proposal(&address, amount, form.fee_rate_sat_vb)
+                .await?
+        }
     } else {
         if let Some(current_id) = status.current_version_id {
             let current = state.wallets.load_or_init(current_id).await?;

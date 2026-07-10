@@ -18,9 +18,28 @@
     {% if locked_recipient.is_none() %}
     <label>
       <span>Amount (BTC)</span>
-      <input type="text" name="amount_btc" required autocomplete="off"
+      <input type="text" id="amount_btc" name="amount_btc" required autocomplete="off"
              placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
     </label>
+    <label class="inline">
+      <input type="checkbox" id="send_max" name="send_max" value="true">
+      <span>Send max — sweep the entire balance to the recipient (network fee deducted from the amount)</span>
+    </label>
+    <script>
+      (function () {
+        var cb = document.getElementById('send_max');
+        var amt = document.getElementById('amount_btc');
+        if (!cb || !amt) return;
+        function sync() {
+          // A disabled input isn't submitted, so send_max requests carry no amount.
+          amt.disabled = cb.checked;
+          amt.required = !cb.checked;
+          if (cb.checked) { amt.value = ''; }
+        }
+        cb.addEventListener('change', sync);
+        sync();
+      })();
+    </script>
     {% else %}
     <p class="muted">The <strong>entire balance</strong> of this version will be swept to the current federation; the network fee is deducted from the amount.</p>
     {% endif %}
