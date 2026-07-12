@@ -18,7 +18,7 @@ publish = false
 # ecosystem's canonical re-exports (`emvault::core::bitcoin`, `…::bdk_wallet`,
 # `…::bdk_bitcoind_rpc`, `…::bitcoincore_rpc`) — single source of truth, no
 # version drift between the app and the library.
-emvault = { version = "0.1", features = ["xpub"] }
+emvault = { version = "0.2", features = ["xpub"] }
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -97,5 +97,5 @@ doc_overindented_list_items = "allow"
 # the local ecosystem tree. Patching the `emvault` facade cascades to the local
 # emvault-core/-xpub/-elements via its path deps. Remove once those land on
 # crates.io and the version bump is published.
-[patch.crates-io]
-emvault = { path = "../emvault" }
+# [patch.crates-io]   # disabled 2026-07-11: emvault 0.2.0 published to crates.io
+# emvault = { path = "../emvault" }
