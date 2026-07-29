@@ -468,8 +468,9 @@ pub async fn sign_data(
 
     // Auto-route by the requesting member's onboarded device type.
     if signer.device_type == "Jade" {
-        let register = build_jade_register(&row.label, row.version_index, row.threshold, &cosigners)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        let register =
+            build_jade_register(&row.label, row.version_index, row.threshold, &cosigners)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
         return Ok(Json(SignDataResponse::Jade {
             psbt_b64: proposal.psbt_b64.clone(),
             jade: JadeSignData {
@@ -739,9 +740,32 @@ pub async fn broadcast(
             enact.migration_id,
         )
         .await?;
+        // Bind the sweep txid to the predecessor (base) version and flip its
+        // reorg-reconciliation status to `complete`. If a later reorg evicts
+        // this sweep from the wallet graph, `WalletManager::sync_lineage`'s
+        // reconcile reverts the version to `pending` and clears the txid,
+        // re-opening it for a re-sweep. This is the app-side custody guard that
+        // a broadcast-then-reorged migration is not silently treated as final.
+        db::set_migration_complete(&state.db, enact.base_version_id, &txid.to_string()).await?;
         tracing::info!(
             %proposal_id, migration = %enact.migration_id,
             new_version = %enact.target_version_id, "migration enacted: version flipped"
+        );
+    }
+
+    // Funds-preserving re-completion: broadcasting a `kind = 'resweep'` (`S'`)
+    // for a base version a censorship reorg reverted to `pending` re-marks that
+    // version `complete`, recording `S'` as the sweep. No version flip — the
+    // flip already happened at the original migration; this only re-closes the
+    // reorg-reconciliation column so the badge flips `pending -> complete` again.
+    // Idempotent: the query returns `None` once the base is no longer `pending`.
+    if let Some(base_version_id) =
+        db::resweep_recompletion_for_proposal(&state.db, proposal_id).await?
+    {
+        db::set_migration_complete(&state.db, base_version_id, &txid.to_string()).await?;
+        tracing::info!(
+            %proposal_id, base_version = %base_version_id,
+            "migration re-sweep broadcast: base version re-marked complete"
         );
     }
 

@@ -1,0 +1,40 @@
+-- Reorg-reconciliation, phase 2: durable confirmation-loss evidence.
+--
+-- 0007 recorded a migrated-away version's sweep `txid` so a re-sync could ask
+-- "is that sweep still present in the wallet graph?" and revert `complete ->
+-- pending` when it was **absent entirely**. That presence test cannot see a
+-- *censorship* reorg: one that strips the sweep of its confirmation but leaves
+-- it floating unconfirmed in the mempool (a re-org that invalidates the sweep's
+-- block while keeping the funding tx confirmed). Under the presence predicate an
+-- unconfirmed-in-mempool sweep still reads "present", so the migration stayed
+-- stuck `complete` even though its confirmation was lost — the exact live
+-- half-failure this column exists to close.
+--
+-- `migration_sweep_confirmed_height` is a **forward-latched** durable witness:
+-- the first time a sync observes this version's recorded sweep *canonically
+-- confirmed*, we record the confirmation height here (see
+-- `db::latch_migration_sweep_height`). It only ever moves from NULL -> a height;
+-- it is cleared back to NULL together with `migration_sweep_txid` when
+-- `db::reconcile_migration` reverts the version.
+--
+-- The reconcile predicate then becomes durable and censorship-aware:
+--
+--     revert complete -> pending  iff
+--         migration_sweep_confirmed_height IS NOT NULL   -- the sweep WAS confirmed
+--       AND the sweep is NOT canonically confirmed now   -- and lost it (reorg)
+--
+-- "absent entirely" (the 0007 case) is just a subcase of "not confirmed now",
+-- so this strictly supersedes the presence gate while adding the confirmation-
+-- loss case. Crucially, a freshly-broadcast sweep that has simply *never
+-- confirmed yet* has a NULL height and is therefore never demote-reverted — we
+-- only ever revert on genuine confirmation LOSS (confirmed-then-gone), which is
+-- unambiguous reorg evidence.
+--
+--   migration_sweep_confirmed_height:
+--     NULL      : the recorded sweep has not yet been observed confirmed
+--                 (just broadcast), or the version is not `complete`
+--     <height>  : the block height at which the sweep was first seen confirmed
+--                 (latched forward; the durable "was confirmed" witness)
+
+ALTER TABLE federations
+    ADD COLUMN IF NOT EXISTS migration_sweep_confirmed_height INTEGER;  -- latched on confirm, cleared on reorg-revert

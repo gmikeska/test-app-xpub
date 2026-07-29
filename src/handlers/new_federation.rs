@@ -34,7 +34,7 @@ use crate::error::AppError;
 use crate::models::SignerRow;
 
 /// Hard cap on the federation label length. The label doubles as the
-/// **FederatedWallet name**: each version registers on the Jade under
+/// **`FederatedWallet` name**: each version registers on the Jade under
 /// `{label}-v{version}`, and Jade caps a multisig registration name at 15 ASCII
 /// chars. Reserving `-v` + up to 3 version digits leaves 10 for the label, so
 /// versions v1..v999 always fit (see [`crate::jade::jade_reg_name`]).

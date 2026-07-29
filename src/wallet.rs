@@ -25,7 +25,7 @@
 //! `bdk_wallet`'s docs recommend for backends that don't implement
 //! `WalletPersister` directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -249,6 +249,18 @@ pub enum WalletError {
         /// Human-readable parse reason.
         reason: String,
     },
+
+    /// A reorg-below-tip was detected but rebuilding the wallet's tx graph from
+    /// its descriptors failed. Surfaced from
+    /// [`emvault::core::chain_sync::ChainSyncError::Rebuild`].
+    #[error("failed to rebuild wallet after reorg: {0}")]
+    RebuildAfterReorg(String),
+
+    /// A migration re-sweep was requested but this wallet holds no stranded
+    /// unconfirmed self-spend to displace — i.e. there is nothing to re-sweep
+    /// (no censorship-reorged sweep floating in the mempool). Surfaced as a 400.
+    #[error("no stranded migration sweep to re-sweep in federation `{0}`")]
+    NoStrandedSweep(Uuid),
 }
 
 impl WalletError {
@@ -260,6 +272,7 @@ impl WalletError {
             ChainSyncError::ApplyBlock { height, source } => {
                 Self::ApplyBlock { id, height, source }
             }
+            ChainSyncError::Rebuild(msg) => Self::RebuildAfterReorg(msg),
         }
     }
 
@@ -412,6 +425,16 @@ impl WalletManager {
         Ok(cache.entry(federation_id).or_insert(fw).clone())
     }
 
+    /// Drop the cached wallet for `federation_id`, forcing the next
+    /// [`load_or_init`](Self::load_or_init) to rebuild it from the persisted
+    /// changeset. Used after
+    /// [`FederationWallet::build_migration_resweep`](FederationWallet::build_migration_resweep),
+    /// whose transient in-memory eviction of the stranded sweep must not leak
+    /// into the shared cache.
+    pub async fn evict_cache(&self, federation_id: Uuid) {
+        self.cache.lock().await.remove(&federation_id);
+    }
+
     /// Sync **every** version's wallet in a lineage (sync fan-out), so historic
     /// (superseded) versions pick up late inflows for relay detection — not just
     /// the current version. Returns the per-version `(federation_id, summary)`.
@@ -433,7 +456,126 @@ impl WalletManager {
             let summary = fw.sync().await?;
             summaries.push((row.id, summary));
         }
+        // App-side reorg reconciliation: latch newly-confirmed migration sweeps,
+        // then revert every optimistically-`complete` version whose sweep *was*
+        // confirmed but has since lost its confirmation anywhere in the lineage's
+        // wallets (durable wallet ground-truth). Runs after the whole lineage is
+        // synced so the confirmation union sees every version's current graph.
+        //
+        // Deliberately **not** gated on "did a version rebuild in *this* pass".
+        // A reorg rebuild is one-shot: the custody-critical persist-*replace* on
+        // `reorg_rebuilt` cleans the phantom sweep out of the graph, so the very
+        // next `sync()` reports `reorg_rebuilt: false`. If reconcile only ran in
+        // the same pass that rebuilt, a rebuild consumed by an *earlier* sync —
+        // the header `fw.sync()` in `federation_manage`, a prior tab reload, or a
+        // background sync — would leave the migration stuck `complete` forever
+        // even though the sweep provably lost its confirmation. The
+        // confirmation-loss predicate is self-sufficient and safe: it only
+        // reverts a sweep that was observed confirmed (latched height) and is no
+        // longer canonically confirmed, and a forward sync never de-confirms a
+        // still-canonical tx.
+        let reverted = self.reconcile_reverted_migrations(lineage_id).await?;
+        // Surface the lineage-wide revert count on a single summary: the version
+        // that rebuilt in this pass if there was one, else the first (the rebuild
+        // may have been consumed by an earlier sync — see above). Leaving the
+        // rest at 0 keeps the per-version counts non-duplicative.
+        if reverted > 0 {
+            if let Some((_, s)) = summaries.iter_mut().find(|(_, s)| s.reorg_rebuilt) {
+                s.migrations_reverted = reverted;
+            } else if let Some((_, s)) = summaries.first_mut() {
+                s.migrations_reverted = reverted;
+            }
+        }
         Ok(summaries)
+    }
+
+    /// Forward-latch newly-confirmed migration sweeps and revert any
+    /// optimistically-`complete` version whose sweep **lost its confirmation** in
+    /// a reorg, in `lineage_id`. **Detection is durable wallet ground-truth** and
+    /// keyed on *confirmation*, not mere presence (migration 0008):
+    ///
+    /// 1. **Latch pass** — for each `complete` version whose recorded sweep has
+    ///    no confirmation height yet, if the sweep is now canonically confirmed
+    ///    anywhere in the lineage, record that height
+    ///    ([`db::latch_migration_sweep_height`], forward-only). This is the
+    ///    durable "was confirmed" witness.
+    /// 2. **Revert pass** — for each `complete` version whose sweep *was* confirmed
+    ///    (height latched) but is **no longer** canonically confirmed — floating
+    ///    unconfirmed after a censorship reorg, or absent entirely — revert it
+    ///    `complete -> pending` (`migration_sweep_txid`/`_confirmed_height ->
+    ///    NULL`) via the guarded, idempotent [`db::reconcile_migration`].
+    ///
+    /// The revert is gated on confirmation *loss* (confirmed-then-not), which is
+    /// unambiguous reorg evidence: a sweep that was merely broadcast and has
+    /// never confirmed (NULL height) is never demote-reverted. Returns the number
+    /// reverted. Backend-agnostic and independent of any `evicted_txids` hint.
+    ///
+    /// **Not** gated on an in-pass `reorg_rebuilt` flag (that gate was fragile:
+    /// the rebuild is one-shot, so a rebuild consumed by an earlier sync left the
+    /// migration stuck `complete` forever). The ground-truth check is
+    /// self-sufficient: the caller ([`Self::sync_lineage`]) syncs every version
+    /// to the node tip first, and a forward sync never de-confirms a still-canonical
+    /// tx — so a latched sweep reads not-confirmed only when its confirmation was
+    /// genuinely lost.
+    ///
+    /// # Errors
+    /// Propagates DB and RPC/BDK errors from loading and reading the lineage's
+    /// wallets.
+    async fn reconcile_reverted_migrations(&self, lineage_id: Uuid) -> Result<u32, WalletError> {
+        let versions = db::load_lineage_versions(&self.pool, lineage_id).await?;
+        // Candidate sweeps: every `complete` version that recorded a sweep txid,
+        // carrying whether it has already latched a confirmation height.
+        let candidates: Vec<(Uuid, Txid, String, Option<i32>)> = versions
+            .iter()
+            .filter(|v| v.migration_status == "complete")
+            .filter_map(|v| {
+                let s = v.migration_sweep_txid.as_deref()?;
+                let txid = s.parse::<Txid>().ok()?;
+                Some((
+                    v.id,
+                    txid,
+                    s.to_string(),
+                    v.migration_sweep_confirmed_height,
+                ))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let wanted: HashSet<Txid> = candidates.iter().map(|(_, txid, _, _)| *txid).collect();
+        // Union canonical *confirmation* across every version's wallet: a sweep
+        // spends one version's UTXO and pays another's address, so it can surface
+        // confirmed in either.
+        let mut confirmed: HashMap<Txid, u32> = HashMap::new();
+        for row in &versions {
+            let fw = self.load_or_init(row.id).await?;
+            for (txid, height) in fw.txids_confirmed(&wanted).await {
+                confirmed.entry(txid).or_insert(height);
+            }
+        }
+        let mut reverted = 0u32;
+        for (id, txid, txid_str, latched_height) in &candidates {
+            match (latched_height, confirmed.get(txid)) {
+                // (a) FORWARD-LATCH: sweep observed confirmed for the first time.
+                (None, Some(height)) => {
+                    let h = i32::try_from(*height).unwrap_or(i32::MAX);
+                    db::latch_migration_sweep_height(&self.pool, *id, txid_str, h).await?;
+                }
+                // (b) CONFIRMATION LOSS: the sweep WAS confirmed (height latched)
+                //     but is no longer canonically confirmed — floating
+                //     unconfirmed after a censorship reorg, or absent entirely.
+                //     Durable reorg evidence -> revert.
+                (Some(_), None) => {
+                    let did_revert = db::reconcile_migration(&self.pool, *id, txid_str).await?;
+                    reverted = reverted.saturating_add(u32::from(did_revert));
+                }
+                // (None, None): broadcast-but-never-confirmed sweep — nothing to
+                //     latch, no confirmation to lose, so never reverted.
+                // (Some, Some): healthy — still canonically confirmed.
+                _ => {}
+            }
+        }
+        Ok(reverted)
     }
 
     /// **Rescan** a federation's wallet from `from_height` (0 = genesis) to the
@@ -712,6 +854,15 @@ pub struct SyncSummary {
     pub new_blocks: u32,
     /// Number of mempool transactions ingested in this sync pass.
     pub new_mempool_txs: u32,
+    /// `true` when this pass detected a reorg below the persisted tip and the
+    /// backend rebuilt the wallet's tx graph from scratch (so the aggregate was
+    /// **replaced**, not merged — see [`FederationWallet::sync`]).
+    pub reorg_rebuilt: bool,
+    /// Number of optimistically-`complete` migrations reverted to `pending` in
+    /// this pass because their recorded sweep txid was reorged out. Set at the
+    /// lineage level by [`WalletManager::sync_lineage`]; a bare
+    /// [`FederationWallet::sync`] always reports `0` (it has no lineage view).
+    pub migrations_reverted: u32,
 }
 
 impl FederationWallet {
@@ -740,6 +891,8 @@ impl FederationWallet {
                     tip_height: result.tip_height,
                     new_blocks: result.blocks_synced,
                     new_mempool_txs: result.new_mempool_txs,
+                    reorg_rebuilt: result.reorg_rebuilt,
+                    migrations_reverted: 0,
                 },
                 result.changeset,
             )
@@ -747,7 +900,17 @@ impl FederationWallet {
 
         if let Some(delta) = delta {
             let mut agg = self.aggregate.lock().await;
-            agg.merge(delta);
+            if summary.reorg_rebuilt {
+                // Replace-not-merge: a reorg-below-tip made the backend stage a
+                // **complete** rebuilt changeset. Merging it into the stale
+                // aggregate would re-introduce the reorged-out phantom UTXO — the
+                // exact bug the from-scratch rebuild exists to fix. This is the
+                // custody-critical seam: the persisted state must reflect the
+                // rebuilt graph, not the union of old and new.
+                *agg = delta;
+            } else {
+                agg.merge(delta);
+            }
             let json = serde_json::to_value(&*agg).map_err(WalletError::EncodeChangeSet)?;
             drop(agg);
             db::update_federation_changeset(
@@ -767,6 +930,36 @@ impl FederationWallet {
         }
 
         Ok(summary)
+    }
+
+    /// Ground-truth **confirmation** check for confirmation-loss reconciliation
+    /// (migration 0008): of `wanted`, which txids are *canonically confirmed* in
+    /// this version's tx graph, and at what block height? A txid that is merely
+    /// unconfirmed-in-mempool, or absent entirely, is **omitted** — it is not
+    /// confirmed. A migration sweep spends a predecessor-version UTXO and pays a
+    /// successor-version address, so it can surface confirmed in either version's
+    /// wallet; the caller ([`WalletManager::reconcile_reverted_migrations`])
+    /// unions this across every version in the lineage.
+    ///
+    /// This deliberately supersedes the earlier presence check (confirmed **or**
+    /// unconfirmed = "present"): a censorship reorg strips the sweep of its
+    /// confirmation but leaves it floating unconfirmed in the mempool, so a
+    /// presence check reads it "present" and never reverts. Keying on
+    /// *confirmation* instead catches that case (confirmed -> unconfirmed) while
+    /// still catching absent-entirely (confirmed -> gone) as a subcase.
+    /// `evicted_txids` is deliberately not consulted; wallet ground-truth governs.
+    async fn txids_confirmed(&self, wanted: &HashSet<Txid>) -> HashMap<Txid, u32> {
+        let mut confirmed = HashMap::new();
+        let wallet = self.inner.lock().await;
+        for wtx in wallet.transactions() {
+            if !wanted.contains(&wtx.tx_node.txid) {
+                continue;
+            }
+            if let ChainPosition::Confirmed { anchor, .. } = wtx.chain_position {
+                confirmed.insert(wtx.tx_node.txid, anchor.block_id.height);
+            }
+        }
+        confirmed
     }
 
     /// Reveal external-keychain addresses 0..n (idempotent), and return
@@ -1162,6 +1355,107 @@ impl FederationWallet {
         fee_rate_sat_vb: u64,
     ) -> Result<BuiltProposal, WalletError> {
         self.build_migration_tx(destination, fee_rate_sat_vb).await
+    }
+
+    /// Build a **funds-preserving migration re-sweep** PSBT (`S'`) that
+    /// force-respends the funding output stranded by a censorship-reorged sweep
+    /// and drains it to `destination` (the active successor version's address),
+    /// at a higher fee, signalling BIP-125 RBF so it *displaces* the old sweep
+    /// in the mempool.
+    ///
+    /// After a censorship reorg the completed migration sweep `S` loses its
+    /// confirmation but keeps floating unconfirmed in the mempool, still
+    /// spending the funding output `D`. BDK therefore marks `D` spent-by-mempool,
+    /// so the ordinary drain builder
+    /// ([`build_migration_tx`](Self::build_migration_tx)) selects nothing — the
+    /// reason this needs its own path. Here we:
+    ///
+    /// 1. Locate `S` — the sole canonical-unconfirmed transaction in this
+    ///    wallet's graph that spends this wallet's own coins (`sent > 0`).
+    /// 2. **Transiently** evict `S` from the *in-memory* canonical set
+    ///    ([`Wallet::apply_evicted_txs`]) so `D` reads unspent again. The
+    ///    eviction delta is **discarded, never persisted** — a build-time device
+    ///    only; the caller ([`WalletManager::evict_cache`]) drops this wallet
+    ///    from the cache afterwards so the next load reflects on-chain reality
+    ///    (and the next sync re-canonicalises `S` from the mempool until `S'`
+    ///    replaces it).
+    /// 3. Drain the freed funding output to `destination` at `fee_rate` (which
+    ///    the caller sets strictly above `S`'s rate). BDK inputs default to
+    ///    `ENABLE_RBF_NO_LOCKTIME`, so `S'` is replaceable and, spending the same
+    ///    input at a higher fee, RBF-displaces `S` on broadcast.
+    ///
+    /// Returns the built proposal and the txid of the sweep `S` it replaces.
+    ///
+    /// # Errors
+    /// - [`WalletError::BadFeeRate`] for a zero fee rate.
+    /// - [`WalletError::NoStrandedSweep`] if no stranded unconfirmed self-spend
+    ///   is present (nothing to re-sweep).
+    /// - [`WalletError::CreateTx`] if BDK can't satisfy the drain after freeing
+    ///   `D`.
+    pub async fn build_migration_resweep(
+        &self,
+        destination: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<(BuiltProposal, Txid), WalletError> {
+        let fee_rate =
+            FeeRate::from_sat_per_vb(fee_rate_sat_vb).ok_or(WalletError::BadFeeRate {
+                sat_per_vb: fee_rate_sat_vb,
+            })?;
+
+        let (psbt, replaced) = {
+            let mut wallet = self.inner.lock().await;
+
+            // 1. Locate the stranded sweep S: the canonical-unconfirmed tx that
+            //    spends this wallet's own coins (a self-originated spend still
+            //    floating in the mempool after the censorship reorg).
+            let stranded = wallet
+                .transactions()
+                .find_map(|wtx| {
+                    if matches!(wtx.chain_position, ChainPosition::Unconfirmed { .. }) {
+                        let (sent, _received) = wallet.sent_and_received(&wtx.tx_node.tx);
+                        if sent > Amount::ZERO {
+                            return Some(wtx.tx_node.txid);
+                        }
+                    }
+                    None
+                })
+                .ok_or(WalletError::NoStrandedSweep(self.id))?;
+
+            // 2. Transiently evict S so its funding input reads unspent. The
+            //    saturating-max timestamp makes the eviction dominate
+            //    canonicalisation for this build; the staged delta is discarded
+            //    so it is NEVER persisted.
+            wallet.apply_evicted_txs([(stranded, u64::MAX)]);
+            let _ = wallet.take_staged();
+
+            // 3. Drain the freed funding output forward at the (higher) fee.
+            let psbt = {
+                let mut builder = wallet.build_tx();
+                builder
+                    .drain_wallet()
+                    .drain_to(destination.script_pubkey())
+                    .fee_rate(fee_rate);
+                builder
+                    .finish()
+                    .map_err(|e| WalletError::CreateTx(e.to_string()))?
+            };
+            // Discard any staged reveal delta — a drain reveals no change, and we
+            // persist nothing from this build (the caller evicts the cache).
+            let _ = wallet.take_staged();
+            drop(wallet);
+            (psbt, stranded)
+        };
+
+        let (proposal_json, coin_selection_json) =
+            self.proposal_view_models(&psbt, destination).await;
+        Ok((
+            BuiltProposal {
+                psbt_b64: psbt.to_string(),
+                proposal_json,
+                coin_selection_json,
+            },
+            replaced,
+        ))
     }
 
     /// Compute the exact net amount a Send-Max drain to `destination` would

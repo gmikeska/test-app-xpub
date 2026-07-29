@@ -18,7 +18,7 @@ publish = false
 # ecosystem's canonical re-exports (`emvault::core::bitcoin`, `…::bdk_wallet`,
 # `…::bdk_bitcoind_rpc`, `…::bitcoincore_rpc`) — single source of truth, no
 # version drift between the app and the library.
-emvault = { version = "0.2", features = ["xpub"] }
+emvault = { version = "0.5", features = ["xpub"] }
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -72,6 +72,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 axum-extra = { version = "0.12.6", features = ["form"] }
 
+[dev-dependencies]
+# Enables `emvault::xpub::test_utils::TestExternalSigner` (BIP-39 hardware-wallet
+# simulator) for the live reorg-reconciliation e2e, which builds a real
+# `wsh(sortedmulti)` federation from mnemonics with no physical device. Cargo
+# unions this with the normal `emvault` dep, so the test build gets xpub +
+# test-utils.
+emvault = { version = "0.5", features = ["test-utils"] }
+
 [features]
 # DB-layer tests (`#[sqlx::test]`) that need a reachable Postgres. Off by
 # default so the regular suite stays DB-free; run with
@@ -97,5 +105,5 @@ doc_overindented_list_items = "allow"
 # the local ecosystem tree. Patching the `emvault` facade cascades to the local
 # emvault-core/-xpub/-elements via its path deps. Remove once those land on
 # crates.io and the version bump is published.
-# [patch.crates-io]   # disabled 2026-07-11: emvault 0.2.0 published to crates.io
-# emvault = { path = "../emvault" }
+[patch.crates-io]   # re-enabled: build against on-disk 0.5.0 tree (reorg fixes) for live-reorg demo
+emvault = { path = "../emvault" }

@@ -14,6 +14,7 @@
       <div>
         <strong>v{{ v.version_index + 1 }}</strong>
         {% if v.is_current %}<span class="badge">current</span>{% else %}<span class="muted">{{ v.status }}</span>{% endif %}
+        {% if v.migration_status == "complete" %}<span class="status-badge status-broadcast" title="migration sweep confirmed">migration: complete</span>{% else if v.migration_status == "pending" %}<span class="status-badge status-signing" title="migration sweep reorged out — re-sweep needed">migration: pending</span>{% endif %}
         — {{ v.balance_btc }} BTC
         {% if v.viewer_can_sign %}<span class="muted">· you can sign</span>{% else %}<span class="muted">· view-only</span>{% endif %}
       </div>
@@ -23,6 +24,12 @@
         <form method="post" action="/federations/{{ v.federation_id }}/relay" class="inline-form">
           <input type="number" name="fee_rate" min="1" step="1" value="2" title="fee rate (sat/vB)">
           <button type="submit" class="primary">Relay funds to current</button>
+        </form>
+        {% endif %}
+        {% if v.resweep_available %}
+        <form method="post" action="/federations/{{ v.federation_id }}/resweep" class="inline-form">
+          <input type="number" name="fee_rate" min="1" step="1" value="4" title="fee rate (sat/vB) — must exceed the reorged sweep's rate to displace it">
+          <button type="submit" class="primary" title="Re-sweep the preserved funds forward, re-completing the reorged migration">Re-run migration sweep</button>
         </form>
         {% endif %}
       </div>

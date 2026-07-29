@@ -250,6 +250,10 @@ struct FederationManageTemplate {
     active_tab: &'static str,
 }
 
+// Four independent per-version UI flags (is_current / viewer_can_sign /
+// relay_available / resweep_available) drive distinct badges and action buttons;
+// folding them into an enum would obscure that they are orthogonal.
+#[allow(clippy::struct_excessive_bools)]
 struct VersionView {
     federation_id: Uuid,
     version_index: i32,
@@ -260,6 +264,16 @@ struct VersionView {
     viewer_can_sign: bool,
     /// Superseded version still holding funds → a relay can sweep them forward.
     relay_available: bool,
+    /// Superseded version whose migration a censorship reorg reverted
+    /// (`migration_status = 'pending'`) → a re-sweep can re-complete it. The
+    /// funds are locked under the stranded unconfirmed sweep (so `balance` reads
+    /// zero — this is deliberately **not** gated on balance, unlike relay).
+    resweep_available: bool,
+    /// Reorg-reconciliation status of this version's migration sweep
+    /// (`not_applicable` | `pending` | `in_progress` | `complete`). Rendered as a
+    /// badge that flips `complete → pending` when a reorg evicts the recorded
+    /// sweep (the live-reorg demo's visible signal).
+    migration_status: String,
 }
 
 /// The roster-change form embedded in the Federation tab. Targets the lineage's
@@ -331,6 +345,12 @@ pub async fn federation_manage(
             // actually sign for (so a current signer doesn't see a relay button on
             // a historic version they can't sign).
             relay_available: !is_current && bal > Amount::ZERO && viewer_can_sign,
+            // Re-sweep is offered on a superseded version whose migration a reorg
+            // reverted (migration_status = 'pending'), for a viewer who can sign
+            // it. Not balance-gated: the funds are stranded under the unconfirmed
+            // old sweep, so the reverted version reads a zero spendable balance.
+            resweep_available: !is_current && v.migration_status == "pending" && viewer_can_sign,
+            migration_status: v.migration_status.clone(),
         });
     }
 
@@ -465,6 +485,108 @@ pub async fn relay_post(
     tracing::info!(
         source = %federation_id, target = %current.id, %proposal_id,
         by = %user.email, "relay sweep proposed (superseded → current)"
+    );
+
+    Ok(Redirect::to(&format!(
+        "/federations/{federation_id}/proposals/{proposal_id}"
+    ))
+    .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /federations/{id}/resweep  — re-complete a censorship-reorged migration
+// ---------------------------------------------------------------------------
+
+/// Form for [`resweep_post`].
+#[derive(Debug, Deserialize)]
+pub struct ResweepForm {
+    /// Fee rate (sat/vB) for the re-sweep `S'`. Must exceed the original sweep's
+    /// rate so `S'` can RBF-displace the stranded old sweep in the mempool; the
+    /// node rejects the broadcast otherwise.
+    pub fee_rate: u64,
+}
+
+/// `POST /federations/{id}/resweep`
+///
+/// Re-complete a migration whose sweep a **censorship reorg** stripped of its
+/// confirmation: the confirmation-loss predicate (migration 0008) reverted this
+/// superseded base version `{id}` to `migration_status = 'pending'` while the
+/// funds stayed preserved in the funding output `D`. The ordinary drain can't
+/// re-sweep — the old sweep `S` sits unconfirmed-in-mempool spending `D`, so BDK
+/// marks `D` spent. Build a re-sweep `S'`
+/// ([`FederationWallet::build_migration_resweep`]) that force-respends `D` and
+/// signals RBF to displace `S`, draining forward to the lineage's current
+/// version. Persisted as a `kind = 'resweep'` proposal on `{id}` (so that
+/// version's members are the signers), whose broadcast re-marks `{id}`
+/// `complete` — no version flip (the flip already happened at the migration).
+///
+/// # Errors
+/// - [`AppError::NotFound`] / [`AppError::BadRequest`] (not a reverted base
+///   version, no enacted migration, or the lineage has no current version).
+/// - [`AppError::Forbidden`] if the viewer isn't a member of `{id}`.
+/// - [`AppError::Wallet`] if the re-sweep can't be built (nothing stranded).
+pub async fn resweep_post(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path(federation_id): Path<Uuid>,
+    Form(body): Form<ResweepForm>,
+) -> Result<Response, AppError> {
+    let source = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+    // Only a base version a reorg reverted (migration_status = 'pending') is
+    // re-sweepable. A healthy `complete` version, or one that never migrated
+    // (`not_applicable`), has nothing to re-complete.
+    if source.migration_status != "pending" {
+        return Err(AppError::BadRequest(
+            "Re-sweep applies only to a migration a reorg reverted (status pending).".to_owned(),
+        ));
+    }
+    ensure_member(&state, federation_id, user.id).await?;
+
+    let migration_id = db::enacted_migration_for_base(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest("no enacted migration to re-complete for this version".to_owned())
+        })?;
+
+    let current = db::current_version_for_lineage(&state.db, source.lineage_id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("lineage has no current version".to_owned()))?;
+    let destination = state
+        .wallets
+        .load_or_init(current.id)
+        .await?
+        .reveal_first_external()
+        .await?;
+
+    // Sync the reverted base so its wallet graph reflects the stranded
+    // unconfirmed sweep, then build the RBF re-sweep S' that displaces it.
+    let source_wallet = state.wallets.load_or_init(federation_id).await?;
+    source_wallet.sync().await?;
+    let (built, replaced) = source_wallet
+        .build_migration_resweep(&destination, body.fee_rate)
+        .await?;
+    // The re-sweep builder transiently evicts the stranded sweep in-memory to
+    // free the funding input; drop the cached wallet so no handler observes that
+    // build-only state (the next load rebuilds from the persisted changeset).
+    state.wallets.evict_cache(federation_id).await;
+
+    let proposal_id = db::insert_resweep_proposal(
+        &state.db,
+        federation_id,
+        user.id,
+        migration_id,
+        &built.psbt_b64,
+        &built.proposal_json,
+        &built.coin_selection_json,
+    )
+    .await?;
+
+    tracing::info!(
+        source = %federation_id, target = %current.id, %proposal_id, %migration_id,
+        replaced_sweep = %replaced, by = %user.email,
+        "migration re-sweep proposed (superseded base -> current, RBF-displacing stranded sweep)"
     );
 
     Ok(Redirect::to(&format!(

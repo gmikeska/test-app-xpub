@@ -175,13 +175,19 @@ mod tests {
         // Every result stays within Jade's 1..15 ASCII limit.
         for (label, vi) in [("Federation", 0), ("Federation", 998), ("", 0)] {
             let name = jade_reg_name(label, vi);
-            assert!(!name.is_empty() && name.len() <= 15, "{name:?} must be 1..15");
+            assert!(
+                !name.is_empty() && name.len() <= 15,
+                "{name:?} must be 1..15"
+            );
             assert!(name.is_ascii());
         }
         // Empty/blank label falls back rather than producing a bare "-v1".
         assert_eq!(jade_reg_name("", 0), "fed-v1");
         // Stable across calls.
-        assert_eq!(jade_reg_name("Federation", 2), jade_reg_name("Federation", 2));
+        assert_eq!(
+            jade_reg_name("Federation", 2),
+            jade_reg_name("Federation", 2)
+        );
     }
 
     #[test]

@@ -76,6 +76,26 @@ pub struct FederationRow {
     pub predecessor_id: Option<Uuid>,
     /// Lifecycle: `pending` | `active` | `superseded` | `abandoned`.
     pub status: String,
+    /// Reorg-reconciliation status for this version's migration sweep:
+    /// `not_applicable` | `pending` | `in_progress` | `complete`. Set to
+    /// `complete` (with [`Self::migration_sweep_txid`]) when a predecessor
+    /// version's funds are swept forward; reverted to `pending` when a reorg
+    /// evicts that sweep. Orthogonal to [`Self::status`].
+    pub migration_status: String,
+    /// Txid of the sweep that moved this version's funds forward, recorded when
+    /// `migration_status` becomes `complete` and cleared (NULL) on a
+    /// reorg-driven revert. See `db::set_migration_complete` /
+    /// `db::reconcile_migration`.
+    pub migration_sweep_txid: Option<String>,
+    /// Block height at which [`Self::migration_sweep_txid`] was first observed
+    /// **canonically confirmed** — the forward-latched, durable "was confirmed"
+    /// witness for reorg-reconciliation. `None` until the sweep confirms (or
+    /// when not `complete`); set once by `db::latch_migration_sweep_height` and
+    /// cleared back to `None` alongside the txid on a reorg-driven revert. The
+    /// reconcile predicate reverts `complete -> pending` iff this is `Some`
+    /// (the sweep was confirmed) **and** the sweep is no longer canonically
+    /// confirmed (confirmation lost) — see `db::reconcile_migration`.
+    pub migration_sweep_confirmed_height: Option<i32>,
     /// Row creation timestamp.
     pub created_at: DateTime<Utc>,
 }

@@ -13,8 +13,8 @@
 //! cargo run --example rescan_federation -- --federation <uuid> --from 250000
 //! ```
 //!
-//! Reads the same `.env` as the web app (DATABASE_URL, BITCOIN_RPC_*,
-//! BITCOIN_NETWORK). Always **persists** the rescanned changeset. A full
+//! Reads the same `.env` as the web app (`DATABASE_URL`, `BITCOIN_RPC_*`,
+//! `BITCOIN_NETWORK`). Always **persists** the rescanned changeset. A full
 //! from-zero scan on signet/mainnet is slow (one `getblock` RPC per block); pass
 //! `--from <height>` near the deposit to bound it. While scanning it shows a
 //! single, in-place progress line (current block + percentage); on completion it

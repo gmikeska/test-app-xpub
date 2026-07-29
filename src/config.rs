@@ -120,8 +120,7 @@ impl AppConfig {
 
         // Missing or non-truthy = false, so the safe (no-overwrite) posture is
         // the default.
-        let allow_jade_overwrite =
-            optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| env_truthy(&v));
+        let allow_jade_overwrite = optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| env_truthy(&v));
 
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
@@ -177,14 +176,18 @@ mod tests {
 
     #[test]
     fn env_truthy_accepts_common_true_spellings() {
-        for v in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", "  true  "] {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "ON", "  true  ",
+        ] {
             assert!(env_truthy(v), "{v:?} should be truthy");
         }
     }
 
     #[test]
     fn env_truthy_rejects_everything_else() {
-        for v in ["", " ", "0", "false", "no", "off", "2", "t", "y", "enabled", "null"] {
+        for v in [
+            "", " ", "0", "false", "no", "off", "2", "t", "y", "enabled", "null",
+        ] {
             assert!(!env_truthy(v), "{v:?} should be falsey");
         }
     }

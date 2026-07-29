@@ -312,7 +312,9 @@ pub async fn list_federations_for_user(
         "SELECT f.id, f.label, f.threshold, f.total_signers, f.network, \
                 f.descriptor, f.snapshot_json, f.bdk_changeset, \
                 f.chain_tip_height, f.lineage_id, f.version_index, \
-                f.predecessor_id, f.status, f.created_at \
+                f.predecessor_id, f.status, f.migration_status, \
+                f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
+                f.created_at \
          FROM federations f \
          JOIN federation_members m ON m.federation_id = f.id \
          WHERE m.user_id = $1 \
@@ -331,7 +333,8 @@ pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Opti
     sqlx::query_as::<_, FederationRow>(
         "SELECT id, label, threshold, total_signers, network, descriptor, \
                 snapshot_json, bdk_changeset, chain_tip_height, lineage_id, \
-                version_index, predecessor_id, status, created_at \
+                version_index, predecessor_id, status, migration_status, \
+                migration_sweep_txid, migration_sweep_confirmed_height, created_at \
          FROM federations WHERE id = $1",
     )
     .bind(id)
@@ -828,8 +831,9 @@ mod versioning {
     use uuid::Uuid;
 
     const FEDERATION_COLS: &str = "id, label, threshold, total_signers, network, descriptor, \
+     migration_sweep_confirmed_height, \
      snapshot_json, bdk_changeset, chain_tip_height, lineage_id, version_index, \
-     predecessor_id, status, created_at";
+     predecessor_id, status, migration_status, migration_sweep_txid, created_at";
 
     /// All versions of a lineage, oldest first (`version_index` ascending).
     ///
@@ -846,6 +850,109 @@ mod versioning {
         .bind(lineage_id)
         .fetch_all(pool)
         .await
+    }
+
+    /// Record that a predecessor version's funds have been swept forward: flip
+    /// its reorg-reconciliation `migration_status` to `complete` and bind the
+    /// sweep `txid`. The migration tool calls this at the point it enacts the
+    /// version transition (broadcast of the migration sweep); the recorded txid
+    /// is what a later re-sync checks against wallet ground-truth (is the sweep
+    /// still present in the rebuilt tx graph?) to decide whether it was reorged
+    /// out — see [`reconcile_migration`].
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn set_migration_complete(
+        pool: &PgPool,
+        version_id: Uuid,
+        sweep_txid: &str,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "UPDATE federations \
+             SET migration_status = 'complete', migration_sweep_txid = $1 \
+             WHERE id = $2",
+        )
+        .bind(sweep_txid)
+        .bind(version_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forward-latch the height at which a `complete` version's recorded sweep
+    /// was first observed **canonically confirmed** — the durable "was
+    /// confirmed" witness for confirmation-loss reconciliation (migration 0008).
+    /// Called from [`WalletManager::sync_lineage`]'s latch pass the first time a
+    /// sync sees the sweep confirmed.
+    ///
+    /// Latches **forward only**: guarded on `migration_sweep_confirmed_height IS
+    /// NULL` (alongside `migration_status = 'complete'` and a matching
+    /// `migration_sweep_txid`), so it records the *first* confirmation height and
+    /// never overwrites it or moves it backward on a later re-org+re-confirm.
+    /// Returns `Ok(true)` iff it latched a row (was previously NULL).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn latch_migration_sweep_height(
+        pool: &PgPool,
+        version_id: Uuid,
+        sweep_txid: &str,
+        height: i32,
+    ) -> sqlx::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE federations \
+             SET migration_sweep_confirmed_height = $3 \
+             WHERE id = $1 AND migration_status = 'complete' \
+               AND migration_sweep_txid = $2 \
+               AND migration_sweep_confirmed_height IS NULL",
+        )
+        .bind(version_id)
+        .bind(sweep_txid)
+        .bind(height)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Revert an optimistically-`complete` version whose migration sweep lost its
+    /// confirmation in a reorg: `migration_status: complete -> pending`,
+    /// `migration_sweep_txid: <txid> -> NULL`, and
+    /// `migration_sweep_confirmed_height: <height> -> NULL`, putting the
+    /// predecessor version back into the re-sweepable state the migration tool
+    /// looks for. `sweep_txid` is the version's own recorded sweep txid (the
+    /// caller has already established, from wallet ground-truth, that it is no
+    /// longer canonically confirmed — either floating unconfirmed after a
+    /// censorship reorg, or absent entirely).
+    ///
+    /// Guarded on `migration_status = 'complete'`, a matching
+    /// `migration_sweep_txid`, **and** `migration_sweep_confirmed_height IS NOT
+    /// NULL` (the sweep must have been observed confirmed — the durable
+    /// confirmation-loss witness). So it is a no-op (returns `Ok(false)`) after
+    /// the first revert (idempotent), can never fire on a healthy version, on a
+    /// version whose recorded sweep is a *different* txid, or on a sweep that was
+    /// broadcast but has **never** confirmed (NULL height). Returns `Ok(true)`
+    /// iff it reverted a row.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn reconcile_migration(
+        pool: &PgPool,
+        version_id: Uuid,
+        sweep_txid: &str,
+    ) -> sqlx::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE federations \
+             SET migration_status = 'pending', migration_sweep_txid = NULL, \
+                 migration_sweep_confirmed_height = NULL \
+             WHERE id = $1 AND migration_status = 'complete' \
+               AND migration_sweep_txid = $2 \
+               AND migration_sweep_confirmed_height IS NOT NULL",
+        )
+        .bind(version_id)
+        .bind(sweep_txid)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// The current (newest `active`) version of a lineage, if any.
@@ -899,7 +1006,9 @@ mod versioning {
             "SELECT DISTINCT ON (f.lineage_id) \
                     f.id, f.label, f.threshold, f.total_signers, f.network, f.descriptor, \
                     f.snapshot_json, f.bdk_changeset, f.chain_tip_height, f.lineage_id, \
-                    f.version_index, f.predecessor_id, f.status, f.created_at \
+                    f.version_index, f.predecessor_id, f.status, f.migration_status, \
+                    f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
+                    f.created_at \
              FROM federations f \
              JOIN federation_members m ON m.federation_id = f.id \
              WHERE m.user_id = $1 \
@@ -1379,6 +1488,92 @@ mod versioning {
         .bind(proposal_json)
         .bind(coin_selection_json)
         .fetch_one(pool)
+        .await
+    }
+
+    /// The `enacted` migration whose **base** (predecessor) version is
+    /// `base_version_id`, if any — i.e. the migration that swept `base` forward
+    /// and has already flipped versions. Used by the funds-preserving re-sweep
+    /// flow to link a `kind = 'resweep'` proposal back to the migration it
+    /// re-completes after a censorship reorg reverted it. Returns `None` when the
+    /// base version has no enacted migration (nothing to re-complete).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn enacted_migration_for_base(
+        pool: &PgPool,
+        base_version_id: Uuid,
+    ) -> sqlx::Result<Option<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM federation_migrations \
+             WHERE base_version_id = $1 AND status = 'enacted' \
+             ORDER BY updated_at DESC LIMIT 1",
+        )
+        .bind(base_version_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Persist a **re-sweep** (`S'`) that re-completes a censorship-reorged
+    /// migration as a `kind = 'resweep'` proposal on the superseded base version
+    /// `federation_id`, linked to the already-`enacted` `migration_id` it
+    /// re-completes. Signed by the base version's members through the ordinary
+    /// proposal → sign → finalize → broadcast flow; broadcasting re-marks the
+    /// base version `complete` (recording `S'`) via
+    /// [`set_migration_complete`] but triggers **no** version flip (the flip
+    /// already happened at the original migration). Returns the proposal id.
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn insert_resweep_proposal(
+        pool: &PgPool,
+        federation_id: Uuid,
+        proposed_by: Uuid,
+        migration_id: Uuid,
+        psbt_b64: &str,
+        proposal_json: &serde_json::Value,
+        coin_selection_json: &serde_json::Value,
+    ) -> sqlx::Result<Uuid> {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO transaction_proposals \
+                (federation_id, proposed_by, label, kind, migration_id, \
+                 psbt_b64, proposal_json, coin_selection_json) \
+             VALUES ($1, $2, 'Migration re-sweep', 'resweep', $3, $4, $5, $6) \
+             RETURNING id",
+        )
+        .bind(federation_id)
+        .bind(proposed_by)
+        .bind(migration_id)
+        .bind(psbt_b64)
+        .bind(proposal_json)
+        .bind(coin_selection_json)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// If `proposal_id` is a `kind = 'resweep'` proposal whose base
+    /// (`federation_id`) version is currently `migration_status = 'pending'`
+    /// (i.e. a completed migration that a censorship reorg reverted), return that
+    /// base version id — the version broadcast should re-mark `complete` with the
+    /// re-sweep's txid. `None` for any other proposal kind, or once the base is
+    /// no longer `pending` (which makes the broadcast re-mark idempotent: a
+    /// re-broadcast can't re-complete an already-complete version).
+    ///
+    /// # Errors
+    /// Propagates any underlying SQL error.
+    pub async fn resweep_recompletion_for_proposal(
+        pool: &PgPool,
+        proposal_id: Uuid,
+    ) -> sqlx::Result<Option<Uuid>> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT f.id \
+             FROM transaction_proposals p \
+             JOIN federations f ON f.id = p.federation_id \
+             WHERE p.id = $1 AND p.kind = 'resweep' \
+               AND f.migration_status = 'pending'",
+        )
+        .bind(proposal_id)
+        .fetch_optional(pool)
         .await
     }
 
