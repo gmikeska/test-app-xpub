@@ -3,7 +3,7 @@
 Server-rendered Axum web app that exercises
 [`emvault-xpub`](https://github.com/gmikeska/emvault-xpub/) and
 [`emvault-core`](https://github.com/gmikeska/emvault-core/) end-to-end against a local Bitcoin
-Core **Signet** node:
+Core node (`regtest` / `testnet` / `signet` / `mainnet`, selected via `BITCOIN_NETWORK`):
 
 1. **User auth.** Email + password login (Argon2id, signed
    cookie-backed sessions stored in Postgres).
@@ -44,6 +44,20 @@ Core **Signet** node:
    4. Once the merged PSBT finalizes, the proposer (or any member) can
       hit **Broadcast** to push the extracted raw transaction to
       bitcoind via `bitcoincore-rpc`.
+6. **Federation creation + migration (versioned lineage).** Federations
+   are created **from the UI** (`GET /federations/new` → `POST
+   /federations`). A federation is a **lineage of versions**: changing the
+   roster/threshold mints a new version and drives a
+   `roster`-planned **migration** that sweeps funds from the old version to
+   the new one (`POST /federations/{id}/migrations`), with a **relay**
+   helper (`POST …/relay`) for fee-bumping the funding hop. The federation
+   management page is `GET /federations/{id}/federation`.
+7. **Reorg reconciliation.** The app tracks each migration sweep's txid and
+   confirmed height (migrations `0007`/`0008`); on chain sync, if a reorg
+   strips the sweep's confirmation it reverts the migration `complete →
+   pending` (funds preserved on the old version), and a funds-preserving
+   **re-sweep** (`POST /federations/{id}/resweep`, migration `0009`)
+   RBF-displaces the stuck sweep to re-complete the migration.
 
 The EmVault Rust library is linked **directly** into the Axum binary —
 there is no separate signing service, no WASM, no proxy. Trezor only
@@ -80,9 +94,10 @@ the UI, routes, templates, or DB schema. This README is the quick-start;
     official CDN; no JS build step. On Linux you may need Trezor's udev
     rules: <https://wiki.trezor.io/Udev_rules>.
   - **Blockstream Jade** (v1 / Plus / DIY ESP32) over **USB** — uses the
-    vendored `@emvault/jade` driver in `static/vendor/emvault-jade/` (kept
-    in sync via `scripts/check-vendor.sh`). **Web Serial requires a
-    Chromium-based desktop browser** (Chrome/Edge/Brave).
+    `@emvault/jade` driver bundled into the app's JS build (served from
+    `static/dist/`, integrity-checked via `scripts/check-vendor.sh`).
+    **Web Serial requires a Chromium-based desktop browser**
+    (Chrome/Edge/Brave).
 
 ## Configuration
 
@@ -127,21 +142,16 @@ On startup the app:
 Open <http://127.0.0.1:8090/> and log in. First-time users are sent to
 `/onboard`; returning users land on `/home`.
 
-## Seeding a federation
+## Creating a federation
 
-Federations are not created from the UI yet — onboarding stops once
-every member has an `ExternalSigner` row. Once each test user has
-onboarded a unique Trezor account, you can seed a federation directly
-in psql (the descriptor builder lives in `emvault-core` and is invoked
-by the `WalletManager` at first wallet load):
-
-```bash
-PGPASSWORD=emvault psql -h localhost -U emvault -d emvault_xpub
-```
-
-Insert a row in `federations` referencing the three signer rows and
-their parent users; the wallet is materialised lazily on the first
-`/federations/{id}/...` request.
+Federations are created **from the UI**. Once each member has onboarded a
+signer, any onboarded user visits `GET /federations/new`, picks the
+members + threshold, and `POST /federations` mints **version 1** of the
+lineage. The descriptor builder lives in `emvault-core` and is invoked by
+the `WalletManager`; the BDK wallet is materialised lazily on the first
+`/federations/{id}/...` request. To change the roster/threshold later, use
+the federation management page (`GET /federations/{id}/federation`), which
+mints a new version and plans the migration sweep from the old one.
 
 ## Routes
 
@@ -154,11 +164,21 @@ their parent users; the wallet is materialised lazily on the first
 | POST   | `/logout`                                                  | `auth::logout_post`                  |
 | GET    | `/onboard`                                                 | `onboard::onboard_get`               |
 | POST   | `/onboard/signer`                                          | `onboard::onboard_signer_post`       |
-| GET    | `/federations/{id}`                                        | redirect → `/receive`                |
+| GET    | `/federations/new`                                         | `new_federation::new_federation_get` |
+| POST   | `/federations`                                             | `new_federation::new_federation_post`|
+| GET    | `/federations/{id}`                                        | `federations::redirect_to_default`   |
+| GET    | `/federations/{id}/federation`                             | `migrations::federation_manage`      |
+| GET    | `/federations/{id}/migrate`                                | `migrations::redirect_to_federation` |
+| GET    | `/federations/{id}/lineage`                                | `migrations::redirect_to_federation` |
+| POST   | `/federations/{id}/migrations`                             | `migrations::migrate_post`           |
+| POST   | `/federations/{id}/migrations/{mid}/cancel`                | `migrations::cancel_post`            |
+| POST   | `/federations/{id}/relay`                                  | `migrations::relay_post`             |
+| POST   | `/federations/{id}/resweep`                                | `migrations::resweep_post`           |
 | GET    | `/federations/{id}/receive`                                | `federations::receive`               |
 | GET    | `/federations/{id}/send`                                   | `federations::send`                  |
 | GET    | `/federations/{id}/addresses/{address}`                    | `addresses::show`                    |
 | POST   | `/federations/{id}/proposals`                              | `proposals::create`                  |
+| GET    | `/federations/{id}/max-spend`                              | `proposals::max_spend`               |
 | GET    | `/federations/{id}/proposals/{pid}`                        | `proposals::detail`                  |
 | GET    | `/federations/{id}/proposals/{pid}/sign-data`              | `proposals::sign_data`               |
 | POST   | `/federations/{id}/proposals/{pid}/signatures`             | `proposals::submit_signature`        |
@@ -202,42 +222,55 @@ test-app-xpub/
 ├── .env
 ├── README.md
 ├── migrations/
-│   ├── 0001_init.sql           users, signers, federations, federation_members
-│   ├── 0002_bdk_wallet.sql     bdk_changeset, tip_height, descriptor checksum cache
-│   └── 0003_proposals.sql      transaction_proposals/_signatures/_rejections
+│   ├── 0001_init.sql                          users, signers, federations, federation_members
+│   ├── 0002_bdk_wallet.sql                    bdk_changeset, tip_height, descriptor checksum cache
+│   ├── 0003_proposals.sql                     transaction_proposals/_signatures/_rejections
+│   ├── 0004_federation_versions.sql           versioned lineage (federations → versions)
+│   ├── 0005_migrations.sql                    federation_migrations record (roster change → version)
+│   ├── 0006_proposal_kind.sql                 proposal kind: migration/relay sweeps alongside spends
+│   ├── 0007_migration_sweep_txid.sql          reorg-reconcile: bind a version's sweep txid to its row
+│   ├── 0008_migration_sweep_confirmed_height.sql  reorg-reconcile p2: durable confirmation-loss evidence
+│   └── 0009_proposal_kind_resweep.sql         reorg-reconcile p3: funds-preserving re-sweep kind
 ├── src/
 │   ├── main.rs                 router, AppState, startup migrate + seed
 │   ├── config.rs               AppConfig::from_env()
-│   ├── db.rs                   PgPool helpers (users, signers, federations, proposals)
+│   ├── db.rs                   PgPool helpers (users, signers, federations, versions, migrations, proposals)
 │   ├── auth.rs                 Argon2id, AuthUser session extractor
 │   ├── error.rs                AppError + IntoResponse (WalletError → 400/502)
-│   ├── models.rs               row structs (UserRow, FederationRow, ProposalRow, …)
+│   ├── models.rs               row structs (UserRow, FederationRow, VersionRow, MigrationRow, ProposalRow, …)
 │   ├── wallet.rs               WalletManager + FederationWallet (BDK + RPC sync,
 │   │                           build_proposal, trezor_sign_request,
 │   │                           merge_partial_signature, finalize_and_extract,
-│   │                           broadcast_raw)
+│   │                           broadcast_raw, build_migration*, build_migration_resweep,
+│   │                           sync_lineage reorg-reconciliation)
 │   └── handlers/
 │       ├── mod.rs
 │       ├── auth.rs             GET/POST /login, POST /logout
 │       ├── onboard.rs          GET /onboard, POST /onboard/signer
 │       ├── home.rs             GET /, GET /home
+│       ├── new_federation.rs   GET /federations/new, POST /federations
 │       ├── federations.rs      /federations/{id}/{receive,send} + BalanceView
+│       ├── migrations.rs       federation manage + migrate/relay/resweep/cancel + reorg-reconcile
 │       ├── addresses.rs        /federations/{id}/addresses/{address} + QR
-│       └── proposals.rs        create/detail/sign-data/signatures/rejections/cancel/broadcast
+│       └── proposals.rs        create/detail/sign-data/signatures/rejections/cancel/broadcast/max-spend
 ├── templates/
 │   ├── base.html
 │   ├── login.html
 │   ├── onboard.html
 │   ├── home.html
+│   ├── federation_new.html     new-federation form (members + threshold)
 │   ├── _federation_layout.html federation header + cosigners + balance + tab strip
 │   ├── federation_receive.html "Receive" tab body (address table)
 │   ├── federation_send.html    "Send" tab body (form + proposal table)
+│   ├── federation_manage.html  federation/migration management (versions, lineage, resweep)
 │   ├── address.html            address detail (QR + receipts)
 │   └── proposal.html           proposal detail (cosigner status + actions)
 └── static/
     ├── styles.css
-    ├── onboard.js              Trezor Connect XPUB capture
-    └── proposal-sign.js        Trezor Connect signTransaction roundtrip
+    └── dist/                   JS build output (served at /static/dist/)
+        ├── onboard.js          Trezor/Jade onboarding (XPUB capture)
+        ├── proposal-sign.js    Trezor/Jade signTransaction roundtrip
+        └── chunks/             shared bundle chunks (incl. the vendored Jade driver)
 ```
 
 ## Development

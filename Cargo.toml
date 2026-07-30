@@ -18,7 +18,7 @@ publish = false
 # ecosystem's canonical re-exports (`emvault::core::bitcoin`, `…::bdk_wallet`,
 # `…::bdk_bitcoind_rpc`, `…::bitcoincore_rpc`) — single source of truth, no
 # version drift between the app and the library.
-emvault = { version = "0.5", features = ["xpub"] }
+emvault = { version = "0.6", features = ["xpub"] }
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -78,7 +78,7 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 # `wsh(sortedmulti)` federation from mnemonics with no physical device. Cargo
 # unions this with the normal `emvault` dep, so the test build gets xpub +
 # test-utils.
-emvault = { version = "0.5", features = ["test-utils"] }
+emvault = { version = "0.6", features = ["test-utils"] }
 
 [features]
 # DB-layer tests (`#[sqlx::test]`) that need a reachable Postgres. Off by

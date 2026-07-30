@@ -53,6 +53,7 @@ Two invariants fall out of this and explain almost every design choice below:
 | `core::NetworkType` | Network passed to the builders | both builders |
 | `core::chain_sync::init_or_load_wallet` | Construct/load the BDK wallet from a descriptor | `WalletManager::load_or_init` |
 | `core::chain_sync::emitter_sync` | Drive the bitcoind Emitter to tip | `FederationWallet::sync` + sweep paths |
+| `core::chain_sync::SyncResult::{evicted_txids, reorg_rebuilt}` | Reorg signals: sweep confirmed-then-gone + reorg-below-tip rebuild (replace-not-merge) | `WalletManager::sync_lineage` (§7a) |
 | `core::psbt::build_spend` | Build an unsigned spend PSBT | `FederationWallet::build_proposal` |
 | `core::psbt::combine_psbt` | Merge a cosigner partial into the base | `FederationWallet::merge_partial_signature` |
 | `core::psbt::finalize_and_extract` | Finalize + extract the raw tx | `FederationWallet::finalize_and_extract` |
@@ -121,7 +122,8 @@ let loaded = chain_sync::init_or_load_wallet(network, descriptor, changeset)?;
 
 // Drive bdk_bitcoind_rpc::Emitter from the wallet's checkpoint to the node tip.
 let result = chain_sync::emitter_sync(&mut wallet, &rpc)?;
-//   -> SyncResult { tip_height, blocks_synced, new_mempool_txs, changeset }
+//   -> SyncResult { tip_height, blocks_synced, new_mempool_txs, changeset,
+//                   evicted_txids, reorg_rebuilt }   // reorg signals — see §7a
 ```
 
 The app's persistence pattern (`FederationWallet::sync`): drive `emitter_sync`,
@@ -224,6 +226,39 @@ lineage views and the `sync_lineage` fan-out.
 
 ---
 
+## 7a. Reorg reconciliation — `core::chain_sync::SyncResult` (app owns the policy)
+
+A migration the app marked **`complete`** can lose its on-chain settlement to a
+reorg. The crate supplies the *signals*; the app owns the *reconciliation policy*.
+
+```rust
+// WalletManager::sync_lineage — sync every version of a lineage, fan-in the signals
+let r = chain_sync::emitter_sync(&mut wallet, &rpc)?;
+if r.reorg_rebuilt {
+    // reorg BELOW the persisted tip: r.changeset is a full genesis rebuild →
+    // REPLACE the persisted aggregate, never merge (merge re-introduces the phantom).
+} else {
+    // forward sync: take_staged() + merge() as usual.
+}
+evicted.extend(r.evicted_txids); // union across all versions in the lineage
+```
+
+- **Revert `complete → pending`.** Each migrated-away version records its sweep
+  txid + confirmed height (migrations `0007`/`0008`). If a version's sweep txid
+  appears in the unioned `evicted_txids` (confirmed-before, absent-after),
+  `sync_lineage` reverts that migration to `pending` — funds are preserved on the
+  pre-migration version, which is re-migratable.
+- **Funds-preserving re-sweep (Path B).** When the old sweep is only stuck (still
+  in the mempool, not evicted), `FederationWallet::build_migration_resweep`
+  (migration `0009`, `resweep`-kind proposal → `POST /federations/{id}/resweep`)
+  builds an RBF replacement that displaces the stuck sweep and re-drives the
+  migration to a confirmed `complete`.
+
+The crate stays funds-agnostic: it reports `evicted_txids` / `reorg_rebuilt`; the
+app decides what a reverted migration means and how to re-enact it.
+
+---
+
 ## 8. Config helpers — `emvault::config`
 
 `AppConfig::from_env` (`config.rs`) reuses the crate's env helpers —
@@ -244,6 +279,7 @@ and `AppConfig::jade_network()` (the `Network` → Jade-firmware-id map from §6
 | Chain data | `chain_sync::{init_or_load_wallet, emitter_sync}` | own the `Wallet` + `ChangeSet` + RPC + **birthday** |
 | Roster math | `roster::{compute_roster_plan, validate_threshold}` | drive the migration via proposals |
 | Track versions | `FederatedWallet` | lineage views + sync fan-out |
+| Reconcile a reorg | `chain_sync::SyncResult::{evicted_txids, reorg_rebuilt}` | `sync_lineage` reverts `complete→pending`; `build_migration_resweep` re-sweeps |
 | Device communication | *(none — by design)* | browser (`@trezor/connect`, `@emvault/jade`) |
 | Persistence / moving funds | *(none — by design)* | Postgres + broadcast |
 
@@ -259,6 +295,7 @@ and `AppConfig::jade_network()` (the `Network` → Jade-firmware-id map from §6
 | Add a hardware-signing flow | shape it in the app (§6), converge on `combine_psbt`; **don't** touch the crate |
 | Change chain-sync / wallet birthday | `WalletManager::load_or_init` + `FederationWallet::sync` → `chain_sync::*` |
 | Change roster/migration logic | `migrations::migrate_post` → `core::roster::*` + `build_federation` |
+| Handle a reorg-reverted migration | `WalletManager::sync_lineage` → `chain_sync::SyncResult::{evicted_txids, reorg_rebuilt}`; re-sweep via `migrations::resweep_post` → `FederationWallet::build_migration_resweep` |
 | Parse a new env var | `AppConfig::from_env` → `emvault::config::{require, optional}` |
 
 ---
