@@ -45,7 +45,11 @@ use emvault::core::bitcoin::{
 };
 use emvault::core::bitcoincore_rpc::{self, Auth, Client as RpcClient, RpcApi};
 use emvault::core::chain_sync::{self, ChainSyncError, InitWalletError};
+use emvault::core::electrum::{ElectrumBackend, ElectrumError};
 use emvault::core::error::PsbtError;
+use emvault::core::esplora::{EsploraBackend, EsploraSyncError, SyncMode};
+
+use crate::config::ChainBackend;
 use emvault::core::psbt as core_psbt;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -144,6 +148,14 @@ pub enum WalletError {
     /// Bitcoin Core RPC error (mempool / `next_block` / etc.).
     #[error("bitcoind RPC error: {0}")]
     Rpc(#[from] bitcoincore_rpc::Error),
+
+    /// Nodeless Esplora / Waterfalls backend error (sync or broadcast).
+    #[error("esplora backend error: {0}")]
+    Esplora(#[from] EsploraSyncError),
+
+    /// Descriptor-private Electrum backend error (sync or broadcast).
+    #[error("electrum backend error: {0}")]
+    Electrum(#[from] ElectrumError),
 
     /// Seeding a fresh federation wallet's birthday checkpoint at the node tip
     /// failed (so its first sync wouldn't have to walk the chain from genesis).
@@ -302,6 +314,11 @@ impl WalletError {
 pub struct WalletManager {
     pool: PgPool,
     rpc: Arc<RpcClient>,
+    /// Nodeless Esplora/Waterfalls backend, set when `APP_CHAIN_BACKEND` selects
+    /// an Esplora mode. `None` = the default Bitcoin Core RPC emitter path.
+    esplora: Option<Arc<EsploraBackend>>,
+    /// Descriptor-private Electrum backend, set when `APP_CHAIN_BACKEND=electrum`.
+    electrum: Option<Arc<ElectrumBackend>>,
     cache: AsyncMutex<HashMap<Uuid, Arc<FederationWallet>>>,
 }
 
@@ -318,9 +335,41 @@ impl WalletManager {
         );
         let rpc =
             RpcClient::new(&config.bitcoin_rpc_url, auth).map_err(WalletError::RpcClientInit)?;
+
+        // Nodeless Esplora/Waterfalls backend selection. `connect` auto-detects
+        // public vs enterprise from the ESPLORA_CLIENT_* env vars; the scan mode
+        // is carried on the backend (`Address` vs `Waterfalls`).
+        let esplora = match config.chain_backend {
+            ChainBackend::Esplora | ChainBackend::Waterfalls => {
+                let mode = if config.chain_backend == ChainBackend::Waterfalls {
+                    SyncMode::Waterfalls
+                } else {
+                    SyncMode::Address
+                };
+                let url = config.esplora_url.as_deref().unwrap_or_default();
+                Some(Arc::new(
+                    EsploraBackend::connect(url, config.network)?.with_mode(mode),
+                ))
+            }
+            ChainBackend::Rpc | ChainBackend::Electrum => None,
+        };
+
+        // Descriptor-private Electrum backend (`APP_CHAIN_BACKEND=electrum`).
+        // `connect` opens the socket up-front; the URL is required by config
+        // validation when this backend is chosen.
+        let electrum = match config.chain_backend {
+            ChainBackend::Electrum => {
+                let url = config.electrum_url.as_deref().unwrap_or_default();
+                Some(Arc::new(ElectrumBackend::connect(url, config.network)?))
+            }
+            ChainBackend::Rpc | ChainBackend::Esplora | ChainBackend::Waterfalls => None,
+        };
+
         Ok(Self {
             pool,
             rpc: Arc::new(rpc),
+            esplora,
+            electrum,
             cache: AsyncMutex::new(HashMap::new()),
         })
     }
@@ -419,6 +468,8 @@ impl WalletManager {
             aggregate: AsyncMutex::new(initial_changeset),
             pool: self.pool.clone(),
             rpc: self.rpc.clone(),
+            esplora: self.esplora.clone(),
+            electrum: self.electrum.clone(),
         });
 
         let mut cache = self.cache.lock().await;
@@ -843,6 +894,11 @@ pub struct FederationWallet {
     aggregate: AsyncMutex<ChangeSet>,
     pool: PgPool,
     rpc: Arc<RpcClient>,
+    /// Nodeless Esplora/Waterfalls backend (clone of the manager's), when
+    /// selected. `None` = the default RPC emitter path.
+    esplora: Option<Arc<EsploraBackend>>,
+    /// Descriptor-private Electrum backend (clone of the manager's), when selected.
+    electrum: Option<Arc<ElectrumBackend>>,
 }
 
 /// Snapshot returned from [`FederationWallet::sync`].
@@ -878,10 +934,21 @@ impl FederationWallet {
     pub async fn sync(&self) -> Result<SyncSummary, WalletError> {
         let (summary, delta) = {
             let mut wallet = self.inner.lock().await;
-            // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
-            // persistence (changeset merge + DB write) stays here.
-            let result = chain_sync::emitter_sync(&mut wallet, &*self.rpc)
-                .map_err(|e| WalletError::from_chain_sync(self.id, e))?;
+            // Backend dispatch. All three paths yield a `chain_sync::SyncResult`
+            // (the nodeless backends convert via `From<…> for SyncResult`), so the
+            // persistence + reorg-reconciliation seam below is backend-agnostic.
+            // The nodeless backends are revealed-only scans; addresses are revealed
+            // on the receive tab (RPC full-scan discovers within the gap limit).
+            let result: chain_sync::SyncResult = if let Some(backend) = self.electrum.as_deref() {
+                backend.sync(&mut wallet).await?.into()
+            } else if let Some(backend) = self.esplora.as_deref() {
+                backend.sync(&mut wallet).await?.into()
+            } else {
+                // Pure-BDK emitter drive lives in `emvault::core::chain_sync` (E3b);
+                // persistence (changeset merge + DB write) stays here.
+                chain_sync::emitter_sync(&mut wallet, &*self.rpc)
+                    .map_err(|e| WalletError::from_chain_sync(self.id, e))?
+            };
             // Drop the BDK guard before falling out of the block so no
             // other request holds the wallet mutex across the DB await
             // below.
@@ -2075,6 +2142,17 @@ impl FederationWallet {
     ///   double-spend, fee-too-low, etc.).
     pub async fn broadcast_raw(&self, tx_hex: &str) -> Result<Txid, WalletError> {
         let bytes = hex_decode(tx_hex).map_err(WalletError::BroadcastRejected)?;
+        // Nodeless / descriptor-private backends push over their own transport.
+        if self.electrum.is_some() || self.esplora.is_some() {
+            let tx: Transaction = bitcoin::consensus::deserialize(&bytes)
+                .map_err(|e| WalletError::BroadcastRejected(e.to_string()))?;
+            if let Some(backend) = self.electrum.as_deref() {
+                return Ok(backend.broadcast(&tx).await?);
+            }
+            if let Some(backend) = self.esplora.as_deref() {
+                return Ok(backend.broadcast(&tx).await?);
+            }
+        }
         let rpc = self.rpc.clone();
         // bitcoincore_rpc::Client is synchronous; spawn-blocking keeps the
         // executor responsive even on slow regtest nodes.

@@ -18,7 +18,7 @@ publish = false
 # ecosystem's canonical re-exports (`emvault::core::bitcoin`, `…::bdk_wallet`,
 # `…::bdk_bitcoind_rpc`, `…::bitcoincore_rpc`) — single source of truth, no
 # version drift between the app and the library.
-emvault = { version = "0.6", features = ["xpub"] }
+emvault = { version = "0.6", features = ["xpub", "esplora", "electrum"] }
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -107,3 +107,6 @@ doc_overindented_list_items = "allow"
 # crates.io and the version bump is published.
 [patch.crates-io]   # re-enabled: build against on-disk 0.5.0 tree (reorg fixes) for live-reorg demo
 emvault = { path = "../emvault" }
+# esplora-rs 0.3.0 (unpublished) carries the waterfalls `TxSeen.v: -1` spend
+# sentinel fix; patched in until Greg publishes 0.3.0. Remove on publish.
+esplora-rs = { path = "../../esplora-rs" }

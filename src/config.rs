@@ -14,6 +14,41 @@ use emvault::config::{hex_decode, optional, require};
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app.
 pub use emvault::config::ConfigError;
 
+/// Which chain backend the app syncs and broadcasts through.
+///
+/// Selected by `APP_CHAIN_BACKEND` (default `rpc`). The two Esplora modes share
+/// one `APP_ESPLORA_URL`; they differ only in scan strategy (`Waterfalls` needs
+/// an enterprise/QuickSync endpoint). `Electrum` uses `APP_ELECTRUM_URL`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChainBackend {
+    /// Bitcoin Core JSON-RPC (`bdk_bitcoind_rpc::Emitter`).
+    #[default]
+    Rpc,
+    /// Nodeless Esplora, address-based scan.
+    Esplora,
+    /// Nodeless Esplora, Waterfalls/QuickSync descriptor scan.
+    Waterfalls,
+    /// Descriptor-private Electrum backend (electrs/Fulcrum over
+    /// `emvault::core::electrum`), selected via `APP_ELECTRUM_URL`.
+    Electrum,
+}
+
+impl FromStr for ChainBackend {
+    type Err = ConfigError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "rpc" => Ok(Self::Rpc),
+            "esplora" => Ok(Self::Esplora),
+            "waterfalls" => Ok(Self::Waterfalls),
+            "electrum" => Ok(Self::Electrum),
+            other => Err(ConfigError::Parse {
+                var: "APP_CHAIN_BACKEND",
+                reason: format!("expected rpc|esplora|waterfalls|electrum, got `{other}`"),
+            }),
+        }
+    }
+}
+
 /// Top-level configuration for the web app.
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -51,6 +86,15 @@ pub struct AppConfig {
     /// only for dev/testing where re-registering a federation under the same
     /// name is expected.
     pub allow_jade_overwrite: bool,
+    /// Which chain backend to sync/broadcast through (`APP_CHAIN_BACKEND`,
+    /// default `rpc`).
+    pub chain_backend: ChainBackend,
+    /// Esplora base URL (`APP_ESPLORA_URL`), required when `chain_backend` is
+    /// `Esplora` or `Waterfalls`; ignored otherwise.
+    pub esplora_url: Option<String>,
+    /// Electrum server URL (`APP_ELECTRUM_URL`, e.g. `tcp://127.0.0.1:60001`),
+    /// required when `chain_backend` is `Electrum`; ignored otherwise.
+    pub electrum_url: Option<String>,
 }
 
 impl AppConfig {
@@ -122,6 +166,31 @@ impl AppConfig {
         // the default.
         let allow_jade_overwrite = optional("ALLOW_JADE_OVERWRITE").is_some_and(|v| env_truthy(&v));
 
+        // Chain-backend selection. Default `rpc` keeps the historical
+        // bitcoind-Emitter path; the nodeless/Electrum backends are opt-in.
+        let chain_backend = match optional("APP_CHAIN_BACKEND") {
+            Some(s) => ChainBackend::from_str(&s)?,
+            None => ChainBackend::default(),
+        };
+        let esplora_url = optional("APP_ESPLORA_URL");
+        if matches!(
+            chain_backend,
+            ChainBackend::Esplora | ChainBackend::Waterfalls
+        ) && esplora_url.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "APP_ESPLORA_URL",
+            });
+        }
+        let electrum_url = optional("APP_ELECTRUM_URL");
+        if chain_backend == ChainBackend::Electrum
+            && electrum_url.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(ConfigError::Missing {
+                var: "APP_ELECTRUM_URL",
+            });
+        }
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -136,6 +205,9 @@ impl AppConfig {
             bitcoin_rpc_password,
             bitcoin_wallet_name,
             allow_jade_overwrite,
+            chain_backend,
+            esplora_url,
+            electrum_url,
         })
     }
 
