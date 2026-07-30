@@ -2,3 +2,5 @@ node_modules/
 static/dist/
 *.log
 target
+.env.bak
+.env
