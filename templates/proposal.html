@@ -7,12 +7,20 @@
     window.EMVAULT = {
       federationId: "{{ federation.id }}",
       proposalId: "{{ proposal.id }}",
+      viewerDeviceType: {{ viewer_device_type|json|safe }},
+      federationIsLiquid: {{ federation.is_liquid }},
       manifestEmail: "dev@emvault.test",
       manifestAppUrl: window.location.origin,
     };
   </script>
-  <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
-  <script type="module" src="/static/dist/proposal-sign.js"></script>
+  {% if viewer_device_type == "trezor" && !federation.is_liquid %}
+    <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
+    <script src="/static/proposal-sign.js" defer></script>
+  {% else if viewer_device_type == "jade" && !federation.is_liquid %}
+    <script src="/static/proposal-sign-jade.js" type="module"></script>
+  {% else if viewer_device_type == "jade" && federation.is_liquid %}
+    <script src="/static/proposal-sign-jade-liquid.js" type="module"></script>
+  {% endif %}
 {% endblock %}
 
 {% block nav %}
@@ -41,13 +49,13 @@
     <dd><code class="break">{{ proposal.recipient }}</code></dd>
 
     <dt>Amount</dt>
-    <dd>{{ proposal.recipient_amount_btc }} BTC</dd>
+    <dd>{{ proposal.recipient_amount_btc }} {{ federation.asset_ticker }}</dd>
 
     <dt>Change</dt>
-    <dd>{{ proposal.change_btc }} BTC</dd>
+    <dd>{{ proposal.change_btc }} {{ federation.asset_ticker }}</dd>
 
     <dt>Fee</dt>
-    <dd>{{ proposal.fee_btc }} BTC</dd>
+    <dd>{{ proposal.fee_btc }} {{ federation.asset_ticker }}</dd>
 
     <dt>Inputs</dt>
     <dd>{{ proposal.input_count }}</dd>
@@ -115,12 +123,32 @@
   <div class="action-row">
     {% if proposal.status == "proposed" || proposal.status == "signing" %}
       {% if viewer_has_signer && !viewer_already_signed %}
-        <button id="sign-btn"
-                class="primary"
-                data-federation-id="{{ federation.id }}"
-                data-proposal-id="{{ proposal.id }}">
-          Sign with {{ viewer_device }}
-        </button>
+        {% if viewer_device_type == "trezor" && !federation.is_liquid %}
+          <button id="sign-btn"
+                  class="primary"
+                  data-federation-id="{{ federation.id }}"
+                  data-proposal-id="{{ proposal.id }}">
+            Sign with Trezor
+          </button>
+        {% else if viewer_device_type == "trezor" && federation.is_liquid %}
+          <span class="muted">Trezor cannot sign Liquid PSETs in this app. Use a Jade to participate in this federation.</span>
+        {% else if viewer_device_type == "jade" && !federation.is_liquid %}
+          <button id="sign-btn"
+                  class="primary"
+                  data-federation-id="{{ federation.id }}"
+                  data-proposal-id="{{ proposal.id }}">
+            Sign with Jade
+          </button>
+        {% else if viewer_device_type == "jade" && federation.is_liquid %}
+          <button id="sign-btn"
+                  class="primary"
+                  data-federation-id="{{ federation.id }}"
+                  data-proposal-id="{{ proposal.id }}">
+            Sign with Jade (Liquid)
+          </button>
+        {% else %}
+          <span class="muted">Signing from your <code>{{ viewer_device_type }}</code> device is not yet supported in this app.</span>
+        {% endif %}
       {% endif %}
 
       {% if viewer_is_member && !viewer_already_rejected %}
@@ -157,7 +185,7 @@
           <th>#</th>
           <th>Outpoint</th>
           <th>Address</th>
-          <th>Amount (BTC)</th>
+          <th>Amount ({{ federation.asset_ticker }})</th>
           <th>Keychain</th>
           <th>Index</th>
         </tr>
@@ -188,7 +216,7 @@
       <thead>
         <tr>
           <th>Address</th>
-          <th>Amount (BTC)</th>
+          <th>Amount ({{ federation.asset_ticker }})</th>
           <th>Kind</th>
         </tr>
       </thead>
@@ -214,7 +242,11 @@
 
 <section class="card">
   <details>
-    <summary><strong>Raw PSBT</strong></summary>
+    {% if federation.is_liquid %}
+      <summary><strong>Raw PSET</strong></summary>
+    {% else %}
+      <summary><strong>Raw PSBT</strong></summary>
+    {% endif %}
     <pre class="psbt"><code>{{ proposal.psbt_b64 }}</code></pre>
     {% if let Some(hex) = proposal.finalized_tx_hex %}
       <h3>Finalized raw tx (hex)</h3>

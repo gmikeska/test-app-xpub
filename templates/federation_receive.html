@@ -11,7 +11,11 @@
 </style>
 <section class="card">
   <h2>Receive addresses</h2>
+  {% if federation.is_liquid %}
+  <p class="muted">Confidential external-keychain addresses (BIP-48 multisig + SLIP-77). Per-address balances are not tracked by LWK in this app.{% if federation_groups.len() > 1 %} Use the tabs to view addresses for each version you're a member of.{% endif %}</p>
+  {% else %}
   <p class="muted">External-keychain addresses (BIP-48 multisig). Click any address to view receipts.{% if federation_groups.len() > 1 %} Use the tabs to view addresses for each version you're a member of.{% endif %}</p>
+  {% endif %}
 
   {% if federation_groups.len() > 1 %}
   <nav class="fed-tabs" role="tablist">
@@ -38,8 +42,8 @@
           <tr>
             <th>#</th>
             <th>Address</th>
-            <th>Received (BTC)</th>
-            <th>Unspent (BTC)</th>
+            <th>Received ({{ federation.asset_ticker }})</th>
+            <th>Unspent ({{ federation.asset_ticker }})</th>
           </tr>
         </thead>
         <tbody>
@@ -47,9 +51,13 @@
             <tr>
               <td>{{ a.index }}</td>
               <td>
-                <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
-                  <code>{{ a.address }}</code>
-                </a>
+                {% if federation.is_liquid %}
+                  <code class="break">{{ a.address }}</code>
+                {% else %}
+                  <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
+                    <code>{{ a.address }}</code>
+                  </a>
+                {% endif %}
               </td>
               <td>{{ a.received_btc }}</td>
               <td>{{ a.unspent_btc }}</td>

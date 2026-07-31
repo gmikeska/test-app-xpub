@@ -1,9 +1,13 @@
-//! Trezor onboarding handlers.
+//! Multi-device onboarding handlers.
 //!
-//! - `GET  /onboard`        — render the page that drives Trezor Connect.
-//! - `POST /onboard/signer` — accept a descriptor-key string from the browser,
-//!                            validate it via `ExternalSigner::from_descriptor_key`,
-//!                            and persist a `signers` row.
+//! - `GET  /onboard`        — render the page that drives one of the
+//!                            supported per-device flows (Trezor Connect
+//!                            today; Blockstream Jade via `WebSerial` +
+//!                            CBOR-RPC also live).
+//! - `POST /onboard/signer` — accept a descriptor-key string + device-type
+//!                            tag from the browser, validate via
+//!                            `ExternalSigner::from_descriptor_key`, and
+//!                            persist a `signers` row.
 
 use std::sync::Arc;
 
@@ -17,12 +21,11 @@ use serde::{Deserialize, Serialize};
 
 use emvault::xpub::ExternalSigner;
 
-use crate::handlers::new_federation::parse_device_type;
-
 use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db;
 use crate::error::AppError;
+use crate::handlers::common::parse_onboard_device_type;
 
 /// Onboarding page template.
 #[derive(Template, WebTemplate)]
@@ -69,20 +72,19 @@ pub async fn onboard_get(
     .into_response())
 }
 
-/// JSON body posted by the browser after `TrezorConnect.getPublicKey`
-/// resolves.
+/// JSON body posted by the browser after the device-specific capture
+/// resolves (Trezor Connect's `getPublicKey` or our Jade `WebSerial` flow).
 #[derive(Debug, Deserialize)]
 pub struct OnboardSignerBody {
     /// BIP-380 descriptor key: `[<fingerprint>/<path>]<xpub>`.
     pub descriptor_key: String,
+    /// Device family the descriptor key was captured from. Today we accept
+    /// `"Trezor"` or `"Jade"`; see
+    /// [`crate::handlers::common::parse_onboard_device_type`].
+    pub device_type: String,
     /// Optional human-readable label.
     #[serde(default)]
     pub label: Option<String>,
-    /// Device family the key was captured from (`"Trezor"` | `"Jade"` | …).
-    /// Defaults to `"Trezor"` for back-compat with older clients. Round-trips
-    /// through [`parse_device_type`] so unknown values fall back to `Generic`.
-    #[serde(default)]
-    pub device_type: Option<String>,
 }
 
 /// Successful onboarding response.
@@ -122,11 +124,24 @@ pub async fn onboard_signer_post(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let device = parse_device_type(body.device_type.as_deref().unwrap_or("Trezor"));
+    let device_type = match parse_onboard_device_type(body.device_type.trim()) {
+        Ok(d) => d,
+        Err(message) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(OnboardSignerError {
+                    status: "error",
+                    message,
+                }),
+            )
+                .into_response());
+        }
+    };
+
     let signer = match ExternalSigner::from_descriptor_key(
         body.descriptor_key.trim(),
         state.config.network,
-        device,
+        device_type,
         label.clone(),
     ) {
         Ok(s) => s,
@@ -167,7 +182,8 @@ pub async fn onboard_signer_post(
                 user = %user.email,
                 signer_id = %row.id,
                 fingerprint = %fingerprint,
-                "trezor onboarded"
+                device = ?device_type,
+                "device onboarded"
             );
             Ok(Json(OnboardSignerResponse {
                 status: "ok",
@@ -188,7 +204,7 @@ pub async fn onboard_signer_post(
                 StatusCode::CONFLICT,
                 Json(OnboardSignerError {
                     status: "error",
-                    message: "This Trezor is already onboarded for your account.".into(),
+                    message: "This device is already onboarded for your account.".into(),
                 }),
             )
                 .into_response())

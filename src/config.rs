@@ -9,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 
 use emvault::core::bitcoin::Network;
+use emvault::elements::ElementsNetwork;
 
 use emvault::config::{hex_decode, optional, require};
 // Re-exported so `crate::config::ConfigError` keeps resolving across the app.
@@ -44,6 +45,35 @@ impl FromStr for ChainBackend {
             other => Err(ConfigError::Parse {
                 var: "APP_CHAIN_BACKEND",
                 reason: format!("expected rpc|esplora|waterfalls|electrum, got `{other}`"),
+            }),
+        }
+    }
+}
+
+/// Which nodeless LWK blockchain client the **Liquid/Elements** wallet syncs and
+/// broadcasts through. Selected by `ELEMENTS_CHAIN_BACKEND` (default `esplora`).
+/// All three are LWK clients — there is no elementsd-RPC path in this app.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ElementsChainBackend {
+    /// Nodeless Esplora address-scan (`ELEMENTS_ESPLORA_URL`).
+    #[default]
+    Esplora,
+    /// Nodeless Esplora Waterfalls descriptor scan (`ELEMENTS_ESPLORA_URL`).
+    Waterfalls,
+    /// Descriptor-private Electrum (`ELEMENTS_ELECTRUM_URL`).
+    Electrum,
+}
+
+impl FromStr for ElementsChainBackend {
+    type Err = ConfigError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "esplora" => Ok(Self::Esplora),
+            "waterfalls" => Ok(Self::Waterfalls),
+            "electrum" => Ok(Self::Electrum),
+            other => Err(ConfigError::Parse {
+                var: "ELEMENTS_CHAIN_BACKEND",
+                reason: format!("expected esplora|waterfalls|electrum, got `{other}`"),
             }),
         }
     }
@@ -95,6 +125,20 @@ pub struct AppConfig {
     /// Electrum server URL (`APP_ELECTRUM_URL`, e.g. `tcp://127.0.0.1:60001`),
     /// required when `chain_backend` is `Electrum`; ignored otherwise.
     pub electrum_url: Option<String>,
+    /// Optional Liquid / Elements network. When `None`, Liquid federation
+    /// creation is disabled in the UI. When `Some`, Liquid federations
+    /// can be created on the configured network.
+    pub elements_network: Option<ElementsNetwork>,
+    /// Which backend the Liquid wallet syncs/broadcasts through
+    /// (`ELEMENTS_CHAIN_BACKEND`, default `esplora`).
+    pub elements_chain_backend: ElementsChainBackend,
+    /// Esplora endpoint for Liquid sync (`ELEMENTS_ESPLORA_URL`). Required when
+    /// `elements_chain_backend` is `Esplora` / `Waterfalls`.
+    pub elements_esplora_url: Option<String>,
+    /// Electrum endpoint for Liquid sync (`ELEMENTS_ELECTRUM_URL`, e.g.
+    /// `tcp://10.44.0.1:60101`). Required when `elements_chain_backend` is
+    /// `Electrum`.
+    pub elements_electrum_url: Option<String>,
 }
 
 impl AppConfig {
@@ -191,6 +235,37 @@ impl AppConfig {
             });
         }
 
+        let elements_network = match optional("ELEMENTS_NETWORK").as_deref() {
+            None => None,
+            Some(s) => Some(parse_elements_network(s)?),
+        };
+        let elements_chain_backend = match optional("ELEMENTS_CHAIN_BACKEND") {
+            Some(s) => ElementsChainBackend::from_str(&s)?,
+            None => ElementsChainBackend::default(),
+        };
+        let elements_esplora_url = optional("ELEMENTS_ESPLORA_URL");
+        let elements_electrum_url = optional("ELEMENTS_ELECTRUM_URL");
+        // Only validate the indexer URL when Liquid is actually enabled.
+        if elements_network.is_some() {
+            match elements_chain_backend {
+                ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls
+                    if elements_esplora_url.as_deref().unwrap_or("").trim().is_empty() =>
+                {
+                    return Err(ConfigError::Missing {
+                        var: "ELEMENTS_ESPLORA_URL",
+                    });
+                }
+                ElementsChainBackend::Electrum
+                    if elements_electrum_url.as_deref().unwrap_or("").trim().is_empty() =>
+                {
+                    return Err(ConfigError::Missing {
+                        var: "ELEMENTS_ELECTRUM_URL",
+                    });
+                }
+                _ => {}
+            }
+        }
+
         Ok(Self {
             bind: SocketAddr::new(host_ip, port),
             session_secret,
@@ -208,6 +283,10 @@ impl AppConfig {
             chain_backend,
             esplora_url,
             electrum_url,
+            elements_network,
+            elements_chain_backend,
+            elements_esplora_url,
+            elements_electrum_url,
         })
     }
 
@@ -240,6 +319,20 @@ fn env_truthy(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn parse_elements_network(s: &str) -> Result<ElementsNetwork, ConfigError> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "liquid" => Ok(ElementsNetwork::Liquid),
+        "liquidtestnet" | "liquid_testnet" => Ok(ElementsNetwork::LiquidTestnet),
+        "elementsregtest" | "elements_regtest" => Ok(ElementsNetwork::ElementsRegtest),
+        other => Err(ConfigError::Parse {
+            var: "ELEMENTS_NETWORK",
+            reason: format!(
+                "expected one of `liquid`, `liquidtestnet`, `elementsregtest`; got `{other}`"
+            ),
+        }),
+    }
 }
 
 #[cfg(test)]

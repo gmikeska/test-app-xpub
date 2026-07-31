@@ -30,6 +30,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use test_app_xpub::config::AppConfig;
+use test_app_xpub::elements_wallet::LwkWalletManager;
 use test_app_xpub::wallet::WalletManager;
 use test_app_xpub::{AppState, auth, db, handlers};
 
@@ -92,10 +93,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Bitcoin Core RPC client ready",
     );
 
+    let elements_wallets = Arc::new(LwkWalletManager::new(pool.clone(), &config));
+    if let Some(net) = config.elements_network {
+        tracing::info!(
+            elements_network = %net,
+            esplora = %config
+                .elements_esplora_url
+                .clone()
+                .unwrap_or_else(|| "<none>".to_string()),
+            "Liquid (LWK) wallet manager ready",
+        );
+    } else {
+        tracing::info!("ELEMENTS_NETWORK not set; Liquid federations are disabled");
+    }
+
     let state = Arc::new(AppState {
         config: config.clone(),
         db: pool,
         wallets,
+        elements_wallets,
     });
 
     // Resolve `static/` relative to the crate root so the binary works
@@ -183,6 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/federations/{id}/proposals/{pid}/signatures",
             post(handlers::proposals::submit_signature),
+        )
+        .route(
+            "/federations/{id}/proposals/{pid}/partial-psbt",
+            post(handlers::proposals::submit_partial_psbt),
         )
         .route(
             "/federations/{id}/proposals/{pid}/rejections",

@@ -22,6 +22,7 @@ use sqlx::PgPool;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod elements_wallet;
 pub mod error;
 pub mod handlers;
 pub mod jade;
@@ -29,6 +30,7 @@ pub mod models;
 pub mod wallet;
 
 use crate::config::AppConfig;
+use crate::elements_wallet::LwkWalletManager;
 use crate::wallet::WalletManager;
 
 /// Application state injected into every handler.
@@ -40,4 +42,6 @@ pub struct AppState {
     pub db: PgPool,
     /// Per-federation BDK wallet cache + Bitcoin Core RPC client.
     pub wallets: Arc<WalletManager>,
+    /// Per-federation LWK wallet cache + Liquid indexer client.
+    pub elements_wallets: Arc<LwkWalletManager>,
 }

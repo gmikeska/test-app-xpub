@@ -10,15 +10,34 @@ publish = false
 [dependencies]
 # EmVault library — consumed through the `emvault` facade. The `xpub` feature
 # pulls in emvault-core + emvault-xpub (XPUB ingestion + Signer/Federation/
-# snapshot) and nothing else.
+# snapshot). `elements` pulls in emvault-elements (Liquid federations, LWK
+# Wollet + PSET). `elements-esplora` / `elements-electrum` enable the nodeless
+# LWK Esplora / Electrum blockchain clients for the Liquid sync + broadcast path.
 #
 # The chain stack — `bitcoin`, `bdk_wallet`, `bdk_bitcoind_rpc` (the rescan
-# Emitter) and `bitcoincore_rpc` (RPC client + broadcast) — is NOT pinned here.
+# Emitter) and `bitcoincore_rpc` (RPC client + broadcast) — plus the Elements
+# stack (`elements`, `elements_miniscript`, `lwk_wollet`) are NOT pinned here.
 # Those crates' types cross the EmVault API, so we consume them through the
-# ecosystem's canonical re-exports (`emvault::core::bitcoin`, `…::bdk_wallet`,
-# `…::bdk_bitcoind_rpc`, `…::bitcoincore_rpc`) — single source of truth, no
-# version drift between the app and the library.
-emvault = { version = "0.6", features = ["xpub", "esplora", "electrum"] }
+# ecosystem's canonical re-exports (`emvault::core::*`, `emvault::elements::*`)
+# — single source of truth, no version drift between the app and the library.
+emvault = { version = "0.6", features = [
+    "xpub",
+    "esplora",
+    "electrum",
+    "elements",
+    "elements-esplora",
+    "elements-electrum",
+] }
+
+# Elements / Liquid — version-pinned to match `asterism-elements`. LWK's
+# `Wollet` is the source of truth for Liquid wallet state (UTXO tracking,
+# CT-address derivation, PSET construction). We enable the `esplora` feature
+# so we can drive sync from `ELEMENTS_ESPLORA_URL`.
+elements = { version = "0.25", features = ["serde"] }
+elements-miniscript = { version = "0.4", features = ["serde"] }
+lwk_wollet = { version = "0.18", default-features = false, features = ["esplora"] }
+secp256k1-zkp = { version = "0.11", features = ["std", "global-context", "rand"] }
+rand = "0.8"
 
 # Server-side QR rendering for the address detail page.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

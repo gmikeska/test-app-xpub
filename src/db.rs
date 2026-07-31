@@ -238,12 +238,57 @@ pub struct NewFederation<'a> {
     pub threshold: i32,
     /// `n` of an m-of-n federation.
     pub total_signers: i32,
-    /// Bitcoin network string (matches BDK's `Network::to_string()`).
+    /// Network string. For Bitcoin matches `bdk_wallet::Network::to_string()`
+    /// (`"bitcoin"`, `"testnet"`, `"signet"`, `"regtest"`); for Liquid one
+    /// of `"liquid"`, `"liquidtestnet"`, `"elementsregtest"`.
     pub network: &'a str,
-    /// Multipath descriptor (`wsh(sortedmulti(m, ...))` with `/<0;1>/*`).
+    /// Multipath descriptor: Bitcoin uses `wsh(sortedmulti(m, ...))` with
+    /// `/<0;1>/*`; Liquid uses
+    /// `ct(slip77(<key>), elwsh(sortedmulti(m, ...)))` with `/<0;1>/*`.
     pub descriptor: &'a str,
     /// Canonical `FederationSnapshot` JSON.
     pub snapshot_json: &'a JsonValue,
+    /// 32-byte SLIP-77 master blinding key. `Some(_)` for Liquid federations,
+    /// `None` for Bitcoin.
+    pub master_blinding_key: Option<&'a [u8; 32]>,
+}
+
+/// Discriminant for [`FederationRow::network`]. Used by handlers to
+/// branch between BDK (Bitcoin) and LWK (Liquid) code paths without
+/// repeatedly re-parsing the network string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FederationKind {
+    /// Bitcoin federation — `wsh(sortedmulti(...))`, BDK pipeline.
+    Bitcoin,
+    /// Liquid federation — `ct(slip77(...), elwsh(sortedmulti(...)))`, LWK pipeline.
+    Liquid,
+}
+
+impl FederationKind {
+    /// Parse a `federations.network` value. Anything LWK recognises maps
+    /// to [`Self::Liquid`]; everything else (including unknown strings)
+    /// falls through to [`Self::Bitcoin`] so legacy rows keep working.
+    #[must_use]
+    pub fn from_network_str(s: &str) -> Self {
+        match s {
+            "liquid" | "liquidtestnet" | "liquid_testnet" | "elementsregtest"
+            | "elements_regtest" => Self::Liquid,
+            _ => Self::Bitcoin,
+        }
+    }
+
+    /// Lookup helper for templates / handlers that need the kind without
+    /// reaching into the `network` string directly.
+    #[must_use]
+    pub fn from_row(row: &FederationRow) -> Self {
+        Self::from_network_str(&row.network)
+    }
+
+    /// `true` iff this is a Liquid federation.
+    #[must_use]
+    pub const fn is_liquid(self) -> bool {
+        matches!(self, Self::Liquid)
+    }
 }
 
 /// Atomically insert a federation row and one `federation_members` row per
@@ -263,12 +308,15 @@ pub async fn insert_federation_with_members(
     // with no default and must equal the row's own id, so we generate the id
     // client-side and set both in the INSERT (a post-insert UPDATE would trip
     // the NOT NULL constraint at insert time). version_index = 0 and
-    // status = 'active' come from column defaults.
+    // status = 'active' come from column defaults. `master_blinding_key` is set
+    // for Liquid federations (`Some`) and NULL for Bitcoin.
     let federation_id = Uuid::new_v4();
+    let mbk_bytes: Option<&[u8]> = spec.master_blinding_key.map(|k| &k[..]);
     sqlx::query(
         "INSERT INTO federations \
-            (id, lineage_id, label, threshold, total_signers, network, descriptor, snapshot_json) \
-         VALUES ($1, $1, $2, $3, $4, $5, $6, $7)",
+            (id, lineage_id, label, threshold, total_signers, network, descriptor, snapshot_json, \
+             master_blinding_key) \
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(federation_id)
     .bind(spec.label)
@@ -277,6 +325,7 @@ pub async fn insert_federation_with_members(
     .bind(spec.network)
     .bind(spec.descriptor)
     .bind(spec.snapshot_json)
+    .bind(mbk_bytes)
     .execute(&mut *tx)
     .await?;
 
@@ -314,7 +363,8 @@ pub async fn list_federations_for_user(
                 f.chain_tip_height, f.lineage_id, f.version_index, \
                 f.predecessor_id, f.status, f.migration_status, \
                 f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
-                f.created_at \
+                f.master_blinding_key, f.next_external_index, \
+                f.next_internal_index, f.created_at \
          FROM federations f \
          JOIN federation_members m ON m.federation_id = f.id \
          WHERE m.user_id = $1 \
@@ -334,7 +384,9 @@ pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Opti
         "SELECT id, label, threshold, total_signers, network, descriptor, \
                 snapshot_json, bdk_changeset, chain_tip_height, lineage_id, \
                 version_index, predecessor_id, status, migration_status, \
-                migration_sweep_txid, migration_sweep_confirmed_height, created_at \
+                migration_sweep_txid, migration_sweep_confirmed_height, \
+                master_blinding_key, next_external_index, next_internal_index, \
+                created_at \
          FROM federations WHERE id = $1",
     )
     .bind(id)
@@ -351,6 +403,51 @@ pub async fn list_all_federation_ids(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM federations ORDER BY created_at, id")
         .fetch_all(pool)
         .await
+}
+
+/// Persist the LWK address-index counters for a Liquid federation.
+///
+/// LWK has no `ChangeSet`-style persistence so we track the next
+/// reveal index per keychain in the federation row directly. This
+/// helper is invoked any time the Liquid wallet reveals additional
+/// addresses (`reveal_addresses` or change-discovery during
+/// `build_proposal`).
+///
+/// # Errors
+/// Propagates any underlying SQL error.
+pub async fn update_federation_indices(
+    pool: &PgPool,
+    federation_id: Uuid,
+    next_external: i32,
+    next_internal: i32,
+    tip_height: Option<i32>,
+) -> sqlx::Result<()> {
+    if let Some(tip) = tip_height {
+        sqlx::query(
+            "UPDATE federations \
+             SET next_external_index = $1, next_internal_index = $2, \
+                 chain_tip_height = $3 \
+             WHERE id = $4",
+        )
+        .bind(next_external)
+        .bind(next_internal)
+        .bind(tip)
+        .bind(federation_id)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE federations \
+             SET next_external_index = $1, next_internal_index = $2 \
+             WHERE id = $3",
+        )
+        .bind(next_external)
+        .bind(next_internal)
+        .bind(federation_id)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 /// `true` iff `user_id` has a `federation_members` row for `federation_id`.

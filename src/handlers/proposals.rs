@@ -4,8 +4,15 @@
 //!
 //! - `POST /federations/:id/proposals`                         — create.
 //! - `GET  /federations/:id/proposals/:pid`                    — detail page.
-//! - `GET  /federations/:id/proposals/:pid/sign-data`          — Trezor JSON.
-//! - `POST /federations/:id/proposals/:pid/signatures`         — submit.
+//! - `GET  /federations/:id/proposals/:pid/sign-data`          — Trezor /
+//!                                                              Jade JSON.
+//! - `POST /federations/:id/proposals/:pid/signatures`         — submit
+//!                                                              per-input
+//!                                                              Trezor sigs.
+//! - `POST /federations/:id/proposals/:pid/partial-psbt`       — submit a
+//!                                                              full
+//!                                                              partial PSBT
+//!                                                              (Jade output).
 //! - `POST /federations/:id/proposals/:pid/rejections`         — advisory.
 //! - `POST /federations/:id/proposals/:pid/cancel`             — proposer-only.
 //! - `POST /federations/:id/proposals/:pid/broadcast`          — when finalized.
@@ -28,12 +35,11 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::AuthUser;
-use crate::db;
+use crate::db::{self, FederationKind};
 use crate::error::AppError;
 use crate::handlers::federations::{
     FederationView, format_btc_sats, format_timestamp, truncate_middle,
 };
-use crate::jade::{JadeRegister, build_jade_register};
 use crate::models::{ProposalRow, SignerRow};
 use crate::wallet::TrezorSignRequest;
 
@@ -75,76 +81,112 @@ pub async fn create(
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
         return Err(AppError::Forbidden);
     }
-
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    // Always sync before building a proposal so coin selection sees the
-    // freshest UTXO set.
-    fw.sync().await?;
-
-    let address = fw.parse_address(form.recipient_address.trim())?;
     if form.fee_rate_sat_vb == 0 {
         return Err(AppError::BadRequest(
             "fee_rate_sat_vb must be at least 1".to_string(),
         ));
     }
+    let kind = FederationKind::from_row(&row);
 
-    // Old signers (members of a previous version but not the current one) may
-    // only move funds forward to the current federation, and do so by sweeping
-    // the **entire** balance (the fee comes out of the amount sent). Current
-    // signers send a chosen amount to any address. Enforced server-side — the
-    // form is only UX.
-    let status =
-        crate::handlers::federations::current_signer_status(&state, row.lineage_id, user.id)
+    let label_ref = form.label.as_deref().filter(|s| !s.trim().is_empty());
+    let proposal = match kind {
+        FederationKind::Bitcoin => {
+            let fw = state.wallets.load_or_init(federation_id).await?;
+            // Always sync before building a proposal so coin selection sees
+            // the freshest UTXO set.
+            fw.sync().await?;
+            let address = fw.parse_address(form.recipient_address.trim())?;
+
+            // Old signers (members of a previous version but not the current
+            // one) may only move funds forward to the current federation, and
+            // do so by sweeping the **entire** balance (the fee comes out of
+            // the amount sent). Current signers send a chosen amount to any
+            // address. Enforced server-side — the form is only UX.
+            let status = crate::handlers::federations::current_signer_status(
+                &state,
+                row.lineage_id,
+                user.id,
+            )
             .await?;
-    let send_max = matches!(form.send_max.as_deref(), Some("true"));
-    let built = if status.is_current_signer {
-        if send_max {
-            // "Send Max": sweep the entire balance to the chosen recipient,
-            // fee out of the swept amount. Reuses the proven drain builder.
-            fw.build_drain_tx(&address, form.fee_rate_sat_vb).await?
-        } else {
+            let send_max = matches!(form.send_max.as_deref(), Some("true"));
+            let built = if status.is_current_signer {
+                if send_max {
+                    // "Send Max": sweep the entire balance to the chosen
+                    // recipient, fee out of the swept amount. Reuses the proven
+                    // drain builder.
+                    fw.build_drain_tx(&address, form.fee_rate_sat_vb).await?
+                } else {
+                    let amount_str = form
+                        .amount_btc
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
+                    let amount = parse_btc_amount(amount_str)?;
+                    fw.build_proposal(&address, amount, form.fee_rate_sat_vb)
+                        .await?
+                }
+            } else {
+                if let Some(current_id) = status.current_version_id {
+                    let current = state.wallets.load_or_init(current_id).await?;
+                    if !current.is_address_mine(&address).await {
+                        return Err(AppError::BadRequest(
+                            "As a signer on a previous federation version, you can only send \
+                             to the current federation."
+                                .to_string(),
+                        ));
+                    }
+                }
+                // Sweep the whole balance forward; the fee comes out of the
+                // swept amount.
+                fw.build_migration_tx(&address, form.fee_rate_sat_vb)
+                    .await?
+            };
+            db::insert_proposal(
+                &state.db,
+                federation_id,
+                user.id,
+                label_ref,
+                &built.psbt_b64,
+                &built.proposal_json,
+                &built.coin_selection_json,
+            )
+            .await?
+        }
+        FederationKind::Liquid => {
+            let fw = state.elements_wallets.load_or_init(federation_id).await?;
+            fw.sync().await?;
+            let address = fw.parse_address(form.recipient_address.trim())?;
+            // Liquid federations don't carry the versioned old-signer migration
+            // flow; a proposal always spends an explicit amount.
             let amount_str = form
                 .amount_btc
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
-            let amount = parse_btc_amount(amount_str)?;
-            fw.build_proposal(&address, amount, form.fee_rate_sat_vb)
-                .await?
-        }
-    } else {
-        if let Some(current_id) = status.current_version_id {
-            let current = state.wallets.load_or_init(current_id).await?;
-            if !current.is_address_mine(&address).await {
-                return Err(AppError::BadRequest(
-                    "As a signer on a previous federation version, you can only send to the \
-                     current federation."
-                        .to_string(),
-                ));
-            }
-        }
-        // Sweep the whole balance forward; the fee comes out of the swept amount.
-        fw.build_migration_tx(&address, form.fee_rate_sat_vb)
+            let satoshi = parse_lbtc_amount_sat(amount_str)?;
+            let built = fw
+                .build_proposal(&address, satoshi, Some(form.fee_rate_sat_vb))
+                .await?;
+            db::insert_proposal(
+                &state.db,
+                federation_id,
+                user.id,
+                label_ref,
+                &built.pset_b64,
+                &built.proposal_json,
+                &built.coin_selection_json,
+            )
             .await?
+        }
     };
-
-    let label_ref = form.label.as_deref().filter(|s| !s.trim().is_empty());
-    let proposal = db::insert_proposal(
-        &state.db,
-        federation_id,
-        user.id,
-        label_ref,
-        &built.psbt_b64,
-        &built.proposal_json,
-        &built.coin_selection_json,
-    )
-    .await?;
 
     tracing::info!(
         federation_id = %federation_id,
         proposal_id = %proposal.id,
         proposer = %user.email,
+        kind = ?kind,
         "created proposal"
     );
 
@@ -153,6 +195,14 @@ pub async fn create(
         proposal.id
     ))
     .into_response())
+}
+
+fn parse_lbtc_amount_sat(input: &str) -> Result<u64, AppError> {
+    // L-BTC amounts use the same 8-decimal formatting as BTC. We piggy-back
+    // on `bitcoin::Amount` for parsing; the sat count is what LWK wants.
+    let amount = bitcoin::Amount::from_str_in(input, bitcoin::Denomination::Bitcoin)
+        .map_err(|e| AppError::BadRequest(format!("invalid L-BTC amount `{input}`: {e}")))?;
+    Ok(amount.to_sat())
 }
 
 // ---------------------------------------------------------------------------
@@ -223,10 +273,10 @@ struct ProposalTemplate {
     /// `true` if the viewer is a federation member with a signer row of
     /// their own (i.e. they can sign).
     viewer_has_signer: bool,
-    /// The viewer's onboarded device family (e.g. `"Trezor"` / `"Jade"`), used
-    /// to label the Sign button. Defaults to `"Trezor"` when the viewer has no
-    /// signer (the button is hidden in that case anyway).
-    viewer_device: String,
+    /// Lower-case device family of the viewer's signer (`"trezor"`,
+    /// `"jade"`), or empty string if the viewer has no signer. Drives
+    /// per-device script + button selection in `proposal.html`.
+    viewer_device_type: String,
     /// `true` if the viewer is a member of this proposal's federation version.
     /// A current signer of the lineage who is *not* a member may view the
     /// proposal read-only, so member-only actions (reject, broadcast) are gated
@@ -340,9 +390,10 @@ pub async fn detail(
     let viewer_signer_row =
         db::find_signer_for_user_in_version(&state.db, user.id, federation_id).await?;
     let viewer_has_signer = viewer_signer_row.is_some();
-    let viewer_device = viewer_signer_row
+    let viewer_device_type = viewer_signer_row
         .as_ref()
-        .map_or_else(|| "Trezor".to_string(), |s| s.device_type.clone());
+        .map(|s| s.device_type.to_lowercase())
+        .unwrap_or_default();
 
     let detail_view = ProposalDetailView {
         id: proposal.id,
@@ -382,7 +433,7 @@ pub async fn detail(
         viewer_already_signed,
         viewer_already_rejected,
         viewer_has_signer,
-        viewer_device,
+        viewer_device_type,
         viewer_is_member,
         back_href,
     }
@@ -393,47 +444,39 @@ pub async fn detail(
 // GET /federations/:id/proposals/:pid/sign-data
 // ---------------------------------------------------------------------------
 
-/// Response shape for the JSON sign-data endpoint, discriminated by `device`
-/// so the browser can run the right flow:
+/// Response shape for the JSON sign-data endpoint.
 ///
-/// - **Trezor** — hands `trezor` straight to `TrezorConnect.signTransaction`,
-///   extracts per-input sigs, and POSTs `signatures_hex`.
-/// - **Jade** — calls `registerMultisig(jade_network, register.name,
-///   register.descriptor)` then `signPsbt(jade_network, psbt)`, and POSTs the
-///   resulting `signed_psbt_b64`.
+/// Trezor consumers hand `trezor` straight to
+/// `TrezorConnect.signTransaction` and use `signer_fingerprint` +
+/// `signer_slots` (echoed via the wrapped struct) to extract the per-input
+/// signatures from the Trezor result before `POST`ing them back to
+/// `/signatures`.
+///
+/// Jade consumers ignore `trezor` entirely and instead use `psbt_b64`,
+/// `descriptor`, and `network` to drive `jade.registerMultisig` +
+/// `jade.signPsbt`, then POST the resulting partial PSBT to
+/// `/partial-psbt`.
 #[derive(Debug, Serialize)]
-#[serde(tag = "device", rename_all = "lowercase")]
-pub enum SignDataResponse {
-    /// Trezor Connect signing payload.
-    Trezor {
-        /// Canonical base PSBT (base64).
-        psbt_b64: String,
-        /// Trezor-shaped `signTransaction` request.
-        trezor: TrezorSignRequest,
-    },
-    /// Jade USB signing payload.
-    Jade {
-        /// Canonical base PSBT (base64) — Jade signs this directly.
-        psbt_b64: String,
-        /// Multisig registration + the Jade network identifier.
-        jade: JadeSignData,
-    },
-}
-
-/// Jade-specific sign-data: the multisig registration the browser must apply
-/// before signing, plus the Jade-firmware network identifier (e.g. `"testnet"`
-/// for Signet).
-#[derive(Debug, Serialize)]
-pub struct JadeSignData {
-    /// Multisig registration (JSON-friendly; browser converts to native form).
-    pub register: JadeRegister,
-    /// Network argument for Jade RPCs (`unlock`/`registerMultisig`/`signPsbt`).
-    pub jade_network: String,
-    /// Whether the browser may overwrite an existing same-name registration on
-    /// the device (gated by the server's `ALLOW_JADE_OVERWRITE`). Default false
-    /// keeps the safe register-once posture; the driver refuses silent
-    /// overwrites unless this is true.
-    pub allow_overwrite: bool,
+pub struct SignDataResponse {
+    /// Canonical base PSBT or PSET (base64) that the device should sign.
+    /// PSBT for Bitcoin federations, PSET for Liquid federations.
+    pub psbt_b64: String,
+    /// Multipath descriptor for this federation. `wsh(sortedmulti(...))`
+    /// for Bitcoin, `ct(slip77(...), elwsh(sortedmulti(...)))` for Liquid.
+    /// Jade uses this to (idempotently) `registerMultisig` /
+    /// `registerLiquidMultisig` before signing.
+    pub descriptor: String,
+    /// Network label. For Bitcoin this matches `federations.network`
+    /// (`"bitcoin"`/`"testnet"`/`"regtest"`); for Liquid it's
+    /// `"liquid"` / `"liquidtestnet"` / `"elementsregtest"`.
+    pub network: String,
+    /// Federation kind tag the browser uses to pick between the
+    /// PSBT and PSET signing flows.
+    pub federation_kind: String,
+    /// Trezor-shaped JSON. Populated only for Bitcoin federations; on
+    /// Liquid the browser doesn't have a Trezor sign path to invoke.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trezor: Option<TrezorSignRequest>,
 }
 
 /// `GET /federations/:id/proposals/:pid/sign-data`
@@ -465,37 +508,36 @@ pub async fn sign_data(
             cosigners.len(),
         )));
     }
-
-    // Auto-route by the requesting member's onboarded device type.
-    if signer.device_type == "Jade" {
-        let register =
-            build_jade_register(&row.label, row.version_index, row.threshold, &cosigners)
-                .map_err(|e| AppError::BadRequest(e.to_string()))?;
-        return Ok(Json(SignDataResponse::Jade {
-            psbt_b64: proposal.psbt_b64.clone(),
-            jade: JadeSignData {
-                register,
-                jade_network: state.config.jade_network().to_string(),
-                allow_overwrite: state.config.allow_jade_overwrite,
-            },
-        })
-        .into_response());
-    }
-
-    // Trezor (default).
     let threshold = usize::try_from(row.threshold).unwrap_or(0);
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let trezor = fw
-        .trezor_sign_request(
-            &proposal.psbt_b64,
-            &signer.fingerprint,
-            &cosigners,
-            threshold,
-        )
-        .await?;
+    let kind = FederationKind::from_row(&row);
 
-    Ok(Json(SignDataResponse::Trezor {
+    let trezor = match kind {
+        FederationKind::Bitcoin => {
+            let fw = state.wallets.load_or_init(federation_id).await?;
+            Some(
+                fw.trezor_sign_request(
+                    &proposal.psbt_b64,
+                    &signer.fingerprint,
+                    &cosigners,
+                    threshold,
+                )
+                .await?,
+            )
+        }
+        // Trezor doesn't sign PSETs in this app, and there's no
+        // request shape we can hand to it for Liquid. The browser
+        // only loads the Jade-Liquid script for these federations.
+        FederationKind::Liquid => None,
+    };
+
+    Ok(Json(SignDataResponse {
         psbt_b64: proposal.psbt_b64.clone(),
+        descriptor: row.descriptor.clone(),
+        network: row.network.clone(),
+        federation_kind: match kind {
+            FederationKind::Bitcoin => "bitcoin".to_string(),
+            FederationKind::Liquid => "liquid".to_string(),
+        },
         trezor,
     })
     .into_response())
@@ -623,6 +665,127 @@ pub async fn submit_signature(
 }
 
 // ---------------------------------------------------------------------------
+// POST /federations/:id/proposals/:pid/partial-psbt
+// ---------------------------------------------------------------------------
+
+/// Body posted by the browser after a Jade-style `signPsbt` resolves.
+///
+/// Unlike the Trezor flow (which ships back per-input DER signatures that
+/// the server slots into a PSBT shell), Jade returns a *complete* partial
+/// PSBT with its `partial_sigs` already populated. The handler can merge
+/// it directly via `Psbt::combine`.
+#[derive(Debug, Deserialize)]
+pub struct SubmitPartialPsbt {
+    /// Base64-encoded partial PSBT containing only the cosigner's
+    /// contributions on top of the canonical base.
+    pub partial_psbt_b64: String,
+}
+
+/// `POST /federations/:id/proposals/:pid/partial-psbt`
+///
+/// Generic device-agnostic counterpart to [`submit_signature`]. Accepts a
+/// full partial PSBT and merges it via [`crate::wallet::FederationWallet::merge_partial_signature`].
+pub async fn submit_partial_psbt(
+    State(state): State<Arc<AppState>>,
+    AuthUser(user): AuthUser,
+    Path((federation_id, proposal_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<SubmitPartialPsbt>,
+) -> Result<Response, AppError> {
+    let row = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+    if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
+        return Err(AppError::Forbidden);
+    }
+    let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
+    require_status_in(&proposal, &["proposed", "signing"])?;
+
+    let signer = db::find_signer_for_user(&state.db, user.id)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("you have no signer onboarded".to_string()))?;
+
+    let kind = FederationKind::from_row(&row);
+    let partial_b64 = body.partial_psbt_b64.trim().to_string();
+
+    let (merged_b64, fully_signed) = match kind {
+        FederationKind::Bitcoin => {
+            let fw = state.wallets.load_or_init(federation_id).await?;
+            let merged = fw
+                .merge_partial_signature(&proposal.psbt_b64, &partial_b64)
+                .await?;
+            (merged.merged_psbt_b64, merged.fully_signed)
+        }
+        FederationKind::Liquid => {
+            let fw = state.elements_wallets.load_or_init(federation_id).await?;
+            let merged = fw
+                .merge_partial_pset(&proposal.psbt_b64, &partial_b64)
+                .await?;
+            (merged.merged_pset_b64, merged.fully_signed)
+        }
+    };
+
+    let new_status = if fully_signed { "finalized" } else { "signing" };
+
+    let inserted =
+        db::insert_signature(&state.db, proposal_id, signer.id, user.id, &partial_b64).await?;
+    if inserted.is_none() {
+        tracing::info!(
+            %proposal_id,
+            cosigner = %user.email,
+            "ignoring duplicate partial-PSBT submission"
+        );
+        return Ok(Json(SubmitSignatureResponse {
+            status: proposal.status.clone(),
+            fully_signed: proposal.status == "finalized",
+        })
+        .into_response());
+    }
+
+    db::update_proposal_psbt(&state.db, proposal_id, &merged_b64, new_status).await?;
+    if fully_signed {
+        match kind {
+            FederationKind::Bitcoin => {
+                let fw = state.wallets.load_or_init(federation_id).await?;
+                let finalized = fw.finalize_and_extract(&merged_b64).await?;
+                db::finalize_proposal(
+                    &state.db,
+                    proposal_id,
+                    &finalized.tx_hex,
+                    &finalized.txid.to_string(),
+                )
+                .await?;
+            }
+            FederationKind::Liquid => {
+                let fw = state.elements_wallets.load_or_init(federation_id).await?;
+                let finalized = fw.finalize_and_extract(&merged_b64).await?;
+                db::finalize_proposal(
+                    &state.db,
+                    proposal_id,
+                    &finalized.tx_hex,
+                    &finalized.txid,
+                )
+                .await?;
+            }
+        }
+    }
+
+    tracing::info!(
+        %proposal_id,
+        cosigner = %user.email,
+        status = %new_status,
+        fully_signed,
+        kind = ?kind,
+        "accepted partial-PSBT submission"
+    );
+
+    Ok(Json(SubmitSignatureResponse {
+        status: new_status.to_string(),
+        fully_signed,
+    })
+    .into_response())
+}
+
+// ---------------------------------------------------------------------------
 // POST /federations/:id/proposals/:pid/rejections
 // ---------------------------------------------------------------------------
 
@@ -709,7 +872,7 @@ pub async fn broadcast(
     AuthUser(user): AuthUser,
     Path((federation_id, proposal_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let _row = db::find_federation_by_id(&state.db, federation_id)
+    let row = db::find_federation_by_id(&state.db, federation_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
@@ -723,11 +886,20 @@ pub async fn broadcast(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("no finalized tx on this proposal".to_string()))?;
 
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let txid = fw.broadcast_raw(tx_hex).await?;
+    let kind = FederationKind::from_row(&row);
+    let txid = match kind {
+        FederationKind::Bitcoin => {
+            let fw = state.wallets.load_or_init(federation_id).await?;
+            fw.broadcast_raw(tx_hex).await?.to_string()
+        }
+        FederationKind::Liquid => {
+            let fw = state.elements_wallets.load_or_init(federation_id).await?;
+            fw.broadcast_raw(tx_hex).await?
+        }
+    };
 
-    db::mark_proposal_broadcast(&state.db, proposal_id, &txid.to_string()).await?;
-    tracing::info!(%proposal_id, %txid, "broadcast finalized proposal");
+    db::mark_proposal_broadcast(&state.db, proposal_id, &txid).await?;
+    tracing::info!(%proposal_id, %txid, kind = ?kind, "broadcast finalized proposal");
 
     // Consent-by-signing: broadcasting a migration transaction enacts the
     // version flip (pending → active, predecessor → superseded). Idempotent —

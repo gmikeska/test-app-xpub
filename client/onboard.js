@@ -301,6 +301,7 @@ import { JadeRpc } from "@emeraldlabs/emvault-jade";
     try {
       const body = {
         descriptor_key: pending.descriptor_key,
+        device_type: "Trezor",
         label: (labelInput.value || "").trim() || null,
         device_type: pending.device_type || "Trezor",
       };
