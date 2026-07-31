@@ -13,7 +13,7 @@
 //!   `Err(_)` for anything outside our supported set so the user sees
 //!   a clear 400 instead of silently being saved as "Generic".
 
-use asterism_xpub::DeviceType;
+use emvault::xpub::DeviceType;
 
 /// Map the `signers.device_type` column value back into a [`DeviceType`].
 ///

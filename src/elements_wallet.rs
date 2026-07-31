@@ -20,10 +20,18 @@
 //!
 //! # Sync model
 //!
-//! When [`crate::config::AppConfig::elements_esplora_url`] is set, sync is
-//! driven by [`lwk_wollet::asyncr::EsploraClient::full_scan`] against that
-//! endpoint. When it's `None`, [`LiquidFederationWallet::sync`] is a no-op
-//! and the UI surfaces a "no Liquid indexer configured" warning.
+//! Sync / broadcast route through the backend selected by
+//! [`crate::config::AppConfig::elements_chain_backend`]:
+//!
+//! - `Esplora` / `Waterfalls` — async [`lwk_wollet::asyncr::EsploraClient`]
+//!   against `ELEMENTS_ESPLORA_URL` (Waterfalls flips the descriptor-endpoint
+//!   fast path on the same client).
+//! - `Electrum` — LWK's blocking `ElectrumClient` against
+//!   `ELEMENTS_ELECTRUM_URL`, run inside [`tokio::task::spawn_blocking`] over a
+//!   released wollet-state snapshot so it never stalls the async runtime.
+//!
+//! When the endpoint for the active backend is unset, [`LiquidFederationWallet::sync`]
+//! is a no-op and the UI surfaces a "no Liquid indexer configured" warning.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -33,16 +41,19 @@ use std::sync::Arc;
 
 use emvault::elements::ElementsNetwork;
 use emvault::elements::elements::pset::PartiallySignedTransaction as Pset;
-use emvault::elements::lwk_wollet::asyncr::EsploraClient;
+use emvault::elements::lwk_wollet::asyncr::{EsploraClient, EsploraClientBuilder};
+use emvault::elements::lwk_wollet::blocking::BlockchainBackend;
 use emvault::elements::lwk_wollet::elements::{
     Address, AddressParams, Transaction, encode::serialize_hex,
 };
-use emvault::elements::lwk_wollet::{TxBuilder, Wollet, WolletBuilder, WolletDescriptor};
+use emvault::elements::lwk_wollet::{
+    ElectrumClient, ElectrumUrl, TxBuilder, Update, Wollet, WolletBuilder, WolletDescriptor,
+};
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ElementsChainBackend};
 use crate::db;
 
 /// Default reveal target: addresses 0..=REVEAL_COUNT-1 on the external
@@ -155,9 +166,7 @@ pub enum ElementsWalletError {
     },
 
     /// No Esplora endpoint configured but a network operation was requested.
-    #[error(
-        "ELEMENTS_ESPLORA_URL is not configured; sync and broadcast are unavailable"
-    )]
+    #[error("ELEMENTS_ESPLORA_URL is not configured; sync and broadcast are unavailable")]
     NoEsploraEndpoint,
 
     /// Database error.
@@ -176,7 +185,12 @@ pub enum ElementsWalletError {
 pub struct LwkWalletManager {
     pool: PgPool,
     network: Option<ElementsNetwork>,
+    /// Chain backend selected via `ELEMENTS_CHAIN_BACKEND`. Determines whether
+    /// sync / broadcast go through Esplora (optionally Waterfalls) or a
+    /// blocking LWK Electrum client.
+    backend: ElementsChainBackend,
     esplora_url: Option<String>,
+    electrum_url: Option<String>,
     cache: AsyncMutex<HashMap<Uuid, Arc<LiquidFederationWallet>>>,
 }
 
@@ -187,7 +201,9 @@ impl LwkWalletManager {
         Self {
             pool,
             network: config.elements_network,
+            backend: config.elements_chain_backend,
             esplora_url: config.elements_esplora_url.clone(),
+            electrum_url: config.elements_electrum_url.clone(),
             cache: AsyncMutex::new(HashMap::new()),
         }
     }
@@ -242,11 +258,12 @@ impl LwkWalletManager {
             .network
             .ok_or(ElementsWalletError::NetworkUnconfigured)?;
 
-        let row_network = parse_row_network(&row.network)
-            .ok_or_else(|| ElementsWalletError::NetworkMismatch {
+        let row_network = parse_row_network(&row.network).ok_or_else(|| {
+            ElementsWalletError::NetworkMismatch {
                 id: federation_id,
                 stored: row.network.clone(),
-            })?;
+            }
+        })?;
         if row_network != server_network {
             return Err(ElementsWalletError::NetworkMismatch {
                 id: federation_id,
@@ -261,7 +278,7 @@ impl LwkWalletManager {
             }
         })?;
 
-        let wollet = WolletBuilder::new(server_network.lwk_network(), descriptor)
+        let wollet = WolletBuilder::new(server_network.to_lwk(), descriptor)
             .build()
             .map_err(|e| ElementsWalletError::BuildWollet {
                 id: federation_id,
@@ -276,7 +293,9 @@ impl LwkWalletManager {
         let fw = Arc::new(LiquidFederationWallet {
             id: federation_id,
             network: server_network,
+            backend: self.backend,
             esplora_url: self.esplora_url.clone(),
+            electrum_url: self.electrum_url.clone(),
             inner: AsyncMutex::new(wollet),
             indices: AsyncMutex::new(KeychainIndices {
                 next_external,
@@ -318,7 +337,10 @@ pub struct LiquidFederationWallet {
     pub id: Uuid,
     /// The wallet's Elements network.
     pub network: ElementsNetwork,
+    /// Selected chain backend (Esplora / Waterfalls / Electrum).
+    backend: ElementsChainBackend,
     esplora_url: Option<String>,
+    electrum_url: Option<String>,
     inner: AsyncMutex<Wollet>,
     indices: AsyncMutex<KeychainIndices>,
     pool: PgPool,
@@ -342,29 +364,22 @@ impl LiquidFederationWallet {
     /// # Errors
     /// See [`ElementsWalletError`].
     pub async fn sync(&self) -> Result<LiquidSyncSummary, ElementsWalletError> {
-        let Some(esplora_url) = &self.esplora_url else {
-            // No indexer configured — return the cached tip from the
-            // wallet (which will be 0 on a fresh load). Handlers surface
-            // this as a UI warning rather than a hard error.
-            let tip = self.inner.lock().await.tip().height();
-            return Ok(LiquidSyncSummary {
-                tip_height: tip,
-                applied_update: false,
-            });
-        };
-
-        let mut client = EsploraClient::new(self.network.lwk_network(), esplora_url);
-
-        // Full-scan against the wollet snapshot. We hold the wollet lock
-        // briefly to clone what `full_scan` needs, then release it before
-        // the (potentially slow) HTTP round-trip, and re-acquire it to
-        // apply the update.
-        let update = {
-            let wollet = self.inner.lock().await;
-            client
-                .full_scan(&wollet)
-                .await
-                .map_err(|e| ElementsWalletError::Sync(e.to_string()))?
+        // Compute the wallet update via the configured chain backend, or a
+        // no-op tip read when no endpoint is configured for that backend.
+        // Handlers surface the no-op case as a UI warning, not a hard error.
+        let update = match self.backend {
+            ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls => {
+                let Some(esplora_url) = self.esplora_url.clone() else {
+                    return self.cached_tip_summary().await;
+                };
+                self.full_scan_esplora(&esplora_url).await?
+            }
+            ElementsChainBackend::Electrum => {
+                let Some(electrum_url) = self.electrum_url.clone() else {
+                    return self.cached_tip_summary().await;
+                };
+                self.full_scan_electrum(&electrum_url).await?
+            }
         };
 
         let (tip, applied) = if let Some(update) = update {
@@ -382,6 +397,59 @@ impl LiquidFederationWallet {
             tip_height: tip,
             applied_update: applied,
         })
+    }
+
+    /// Read the cached wallet tip without contacting any indexer. Returned
+    /// when no endpoint is configured for the active backend (fresh loads
+    /// report height `0`).
+    async fn cached_tip_summary(&self) -> Result<LiquidSyncSummary, ElementsWalletError> {
+        let tip = self.inner.lock().await.tip().height();
+        Ok(LiquidSyncSummary {
+            tip_height: tip,
+            applied_update: false,
+        })
+    }
+
+    /// Async Esplora full-scan. When the backend is [`ElementsChainBackend::Waterfalls`]
+    /// the client negotiates the descriptor endpoint (fewer round-trips).
+    ///
+    /// The wollet lock is held only to clone the scan state, then released
+    /// before the (potentially slow) HTTP round-trip.
+    async fn full_scan_esplora(
+        &self,
+        esplora_url: &str,
+    ) -> Result<Option<Update>, ElementsWalletError> {
+        let mut client = EsploraClientBuilder::new(esplora_url, self.network.to_lwk())
+            .waterfalls(matches!(self.backend, ElementsChainBackend::Waterfalls))
+            .build()
+            .map_err(|e| ElementsWalletError::Sync(e.to_string()))?;
+        let wollet = self.inner.lock().await;
+        client
+            .full_scan(&wollet)
+            .await
+            .map_err(|e| ElementsWalletError::Sync(e.to_string()))
+    }
+
+    /// Electrum full-scan. LWK's `ElectrumClient` is a blocking client, so we
+    /// snapshot the wollet state (releasing the async lock) and run the scan
+    /// on a blocking thread via [`tokio::task::spawn_blocking`], mirroring the
+    /// Esplora flow.
+    async fn full_scan_electrum(
+        &self,
+        electrum_url: &str,
+    ) -> Result<Option<Update>, ElementsWalletError> {
+        // `WolletConciseState` is owned + `Send`, letting us release the async
+        // lock before the blocking network round-trip.
+        let state = { self.inner.lock().await.state() };
+        let electrum_url = electrum_url.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<Update>, String> {
+            let url = ElectrumUrl::from_str(&electrum_url).map_err(|e| e.to_string())?;
+            let mut client = ElectrumClient::new(&url).map_err(|e| e.to_string())?;
+            client.full_scan(&state).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| ElementsWalletError::Sync(format!("electrum scan task failed: {e}")))?
+        .map_err(ElementsWalletError::Sync)
     }
 
     /// Reveal external-keychain addresses 0..n (idempotent), and return
@@ -498,7 +566,7 @@ impl LiquidFederationWallet {
                 v
             });
 
-            let mut builder = TxBuilder::new(self.network.lwk_network())
+            let mut builder = TxBuilder::new(self.network.to_lwk())
                 .add_lbtc_recipient(recipient, satoshi)
                 .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
             builder = builder.fee_rate(lwk_fee_rate);
@@ -542,8 +610,8 @@ impl LiquidFederationWallet {
         base_pset_b64: &str,
         partial_b64: &str,
     ) -> Result<MergedLiquidPset, ElementsWalletError> {
-        let mut base =
-            Pset::from_str(base_pset_b64).map_err(|e| ElementsWalletError::BadPset(e.to_string()))?;
+        let mut base = Pset::from_str(base_pset_b64)
+            .map_err(|e| ElementsWalletError::BadPset(e.to_string()))?;
         let partial =
             Pset::from_str(partial_b64).map_err(|e| ElementsWalletError::BadPset(e.to_string()))?;
         base.merge(partial)
@@ -570,8 +638,8 @@ impl LiquidFederationWallet {
         &self,
         pset_b64: &str,
     ) -> Result<FinalizedLiquidTx, ElementsWalletError> {
-        let mut pset = Pset::from_str(pset_b64)
-            .map_err(|e| ElementsWalletError::BadPset(e.to_string()))?;
+        let mut pset =
+            Pset::from_str(pset_b64).map_err(|e| ElementsWalletError::BadPset(e.to_string()))?;
         let wollet = self.inner.lock().await;
         let tx: Transaction = wollet
             .finalize(&mut pset)
@@ -590,27 +658,58 @@ impl LiquidFederationWallet {
     ///   configured.
     /// - [`ElementsWalletError::BroadcastRejected`] on RPC failure.
     pub async fn broadcast_raw(&self, tx_hex: &str) -> Result<String, ElementsWalletError> {
-        let esplora_url = self
-            .esplora_url
-            .as_deref()
-            .ok_or(ElementsWalletError::NoEsploraEndpoint)?;
         let bytes = hex_decode(tx_hex)
             .map_err(|e| ElementsWalletError::BroadcastRejected(format!("invalid hex: {e}")))?;
-        let tx: Transaction = lwk_wollet::elements::encode::deserialize(&bytes)
-            .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
-        let client = EsploraClient::new(self.network.lwk_network(), esplora_url);
-        let txid = client
-            .broadcast(&tx)
-            .await
-            .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
-        Ok(txid.to_string())
+
+        match self.backend {
+            ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls => {
+                let esplora_url = self
+                    .esplora_url
+                    .as_deref()
+                    .ok_or(ElementsWalletError::NoEsploraEndpoint)?;
+                let tx: Transaction =
+                    emvault::elements::lwk_wollet::elements::encode::deserialize(&bytes)
+                        .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                let client = EsploraClient::new(self.network.to_lwk(), esplora_url);
+                let txid = client
+                    .broadcast(&tx)
+                    .await
+                    .map_err(|e| ElementsWalletError::BroadcastRejected(e.to_string()))?;
+                Ok(txid.to_string())
+            }
+            ElementsChainBackend::Electrum => {
+                let electrum_url = self
+                    .electrum_url
+                    .clone()
+                    .ok_or(ElementsWalletError::NoEsploraEndpoint)?;
+                // Blocking Electrum client — broadcast on a blocking thread,
+                // mirroring the sync path.
+                tokio::task::spawn_blocking(move || -> Result<String, String> {
+                    let tx: Transaction =
+                        emvault::elements::lwk_wollet::elements::encode::deserialize(&bytes)
+                            .map_err(|e| e.to_string())?;
+                    let url = ElectrumUrl::from_str(&electrum_url).map_err(|e| e.to_string())?;
+                    let client = ElectrumClient::new(&url).map_err(|e| e.to_string())?;
+                    client
+                        .broadcast(&tx)
+                        .map(|t| t.to_string())
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| {
+                    ElementsWalletError::BroadcastRejected(format!(
+                        "electrum broadcast task failed: {e}"
+                    ))
+                })?
+                .map_err(ElementsWalletError::BroadcastRejected)
+            }
+        }
     }
 }
 
 fn is_address_for_network(addr: &Address, network: ElementsNetwork) -> bool {
     let want: &AddressParams = network.address_params();
-    std::ptr::eq(addr.params, want)
-        || addr.params == want
+    std::ptr::eq(addr.params, want) || addr.params == want
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {

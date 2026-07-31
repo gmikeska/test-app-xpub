@@ -69,6 +69,10 @@ pub struct CreateProposalForm {
 }
 
 /// `POST /federations/:id/proposals`
+// Two full per-chain proposal-build branches (Bitcoin custody flow + Liquid
+// PSET flow) live in one dispatch; splitting them would only scatter the
+// closely-related validation.
+#[allow(clippy::too_many_lines)]
 pub async fn create(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
@@ -700,7 +704,7 @@ pub async fn submit_partial_psbt(
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     require_status_in(&proposal, &["proposed", "signing"])?;
 
-    let signer = db::find_signer_for_user(&state.db, user.id)
+    let signer = db::find_signer_for_user_in_version(&state.db, user.id, federation_id)
         .await?
         .ok_or_else(|| AppError::BadRequest("you have no signer onboarded".to_string()))?;
 
@@ -758,13 +762,8 @@ pub async fn submit_partial_psbt(
             FederationKind::Liquid => {
                 let fw = state.elements_wallets.load_or_init(federation_id).await?;
                 let finalized = fw.finalize_and_extract(&merged_b64).await?;
-                db::finalize_proposal(
-                    &state.db,
-                    proposal_id,
-                    &finalized.tx_hex,
-                    &finalized.txid,
-                )
-                .await?;
+                db::finalize_proposal(&state.db, proposal_id, &finalized.tx_hex, &finalized.txid)
+                    .await?;
             }
         }
     }
@@ -918,7 +917,7 @@ pub async fn broadcast(
         // reconcile reverts the version to `pending` and clears the txid,
         // re-opening it for a re-sweep. This is the app-side custody guard that
         // a broadcast-then-reorged migration is not silently treated as final.
-        db::set_migration_complete(&state.db, enact.base_version_id, &txid.to_string()).await?;
+        db::set_migration_complete(&state.db, enact.base_version_id, &txid).await?;
         tracing::info!(
             %proposal_id, migration = %enact.migration_id,
             new_version = %enact.target_version_id, "migration enacted: version flipped"
@@ -934,7 +933,7 @@ pub async fn broadcast(
     if let Some(base_version_id) =
         db::resweep_recompletion_for_proposal(&state.db, proposal_id).await?
     {
-        db::set_migration_complete(&state.db, base_version_id, &txid.to_string()).await?;
+        db::set_migration_complete(&state.db, base_version_id, &txid).await?;
         tracing::info!(
             %proposal_id, base_version = %base_version_id,
             "migration re-sweep broadcast: base version re-marked complete"

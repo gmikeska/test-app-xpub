@@ -232,6 +232,7 @@ async fn provision_federation(pool: &sqlx::PgPool, config: &AppConfig) -> Uuid {
         network: "regtest",
         descriptor: &built.descriptor_string,
         snapshot_json: &built.snapshot_json,
+        master_blinding_key: None,
     };
     db::insert_federation_with_members(pool, &spec, &[])
         .await

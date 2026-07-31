@@ -34,7 +34,6 @@ use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db::{self, NewFederation, UserPickerRow};
 use crate::error::AppError;
-use crate::handlers::common::parse_device_type;
 use crate::models::SignerRow;
 
 /// Hard cap on the federation label length. The label doubles as the

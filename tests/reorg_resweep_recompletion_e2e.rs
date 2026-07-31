@@ -296,6 +296,7 @@ async fn censorship_reorg_resweep_recompletes_migration() {
             network: "regtest",
             descriptor: &v0_built.descriptor_string,
             snapshot_json: &v0_built.snapshot_json,
+            master_blinding_key: None,
         },
         &[],
     )

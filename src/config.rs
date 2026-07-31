@@ -147,6 +147,7 @@ impl AppConfig {
     /// # Errors
     /// Returns [`ConfigError`] if any required variable is missing or any
     /// value fails to parse.
+    #[allow(clippy::too_many_lines)] // linear env-var reads; splitting adds no clarity
     pub fn from_env() -> Result<Self, ConfigError> {
         let host = require("APP_HOST")?;
         let port: u16 = require("APP_PORT")?
@@ -249,14 +250,22 @@ impl AppConfig {
         if elements_network.is_some() {
             match elements_chain_backend {
                 ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls
-                    if elements_esplora_url.as_deref().unwrap_or("").trim().is_empty() =>
+                    if elements_esplora_url
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty() =>
                 {
                     return Err(ConfigError::Missing {
                         var: "ELEMENTS_ESPLORA_URL",
                     });
                 }
                 ElementsChainBackend::Electrum
-                    if elements_electrum_url.as_deref().unwrap_or("").trim().is_empty() =>
+                    if elements_electrum_url
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty() =>
                 {
                     return Err(ConfigError::Missing {
                         var: "ELEMENTS_ELECTRUM_URL",
