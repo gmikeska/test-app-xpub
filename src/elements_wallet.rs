@@ -598,6 +598,60 @@ impl LiquidFederationWallet {
         })
     }
 
+    /// Build a **drain** (send-max) PSET sweeping this federation's entire L-BTC
+    /// balance to `destination` — the migration sweep from the current Liquid
+    /// federation to its successor. Same shape as [`Self::build_proposal`] but
+    /// uses LWK's `drain_lbtc_wallet`, so the full balance minus the mining fee
+    /// lands at the successor's address. The successor recognises the inflow once
+    /// it syncs its own CT descriptor. Signing / finalize / broadcast reuse the
+    /// regular Liquid proposal path.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::BuildPset`] if LWK cannot build the drain (e.g. no
+    /// spendable balance, or fee exceeds value).
+    pub async fn build_migration_pset(
+        &self,
+        destination: &Address,
+        fee_rate_sat_vb: Option<u64>,
+    ) -> Result<BuiltLiquidProposal, ElementsWalletError> {
+        let pset_b64 = {
+            let wollet = self.inner.lock().await;
+            let lwk_fee_rate = fee_rate_sat_vb.map(|sat_vb| {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let v = (sat_vb as f64 * 1000.0) as f32;
+                v
+            });
+            let pset = TxBuilder::new(self.network.to_lwk())
+                .drain_lbtc_wallet()
+                .drain_lbtc_to(destination.clone())
+                .fee_rate(lwk_fee_rate)
+                .finish(&wollet)
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            drop(wollet);
+            pset.to_string()
+        };
+
+        let proposal_json = serde_json::json!({
+            "recipient": destination.to_string(),
+            "kind": "migration",
+            "asset": "L-BTC",
+            "fee_rate_sat_vb": fee_rate_sat_vb,
+        });
+        let coin_selection_json = serde_json::json!({
+            "selected": [],
+            "outputs": [],
+            "fee_sat": serde_json::Value::Null,
+            "total_input_sat": serde_json::Value::Null,
+            "note": "LWK-driven drain sweep; details deliberately elided in v1.",
+        });
+
+        Ok(BuiltLiquidProposal {
+            pset_b64,
+            proposal_json,
+            coin_selection_json,
+        })
+    }
+
     /// Merge a cosigner's partial PSET into the canonical base PSET.
     /// Returns the merged PSET (still as base64) and a flag indicating
     /// whether [`Wollet::finalize`] succeeds against the merged result.

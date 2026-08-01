@@ -23,9 +23,13 @@ use axum_extra::extract::Form;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use emvault::core::NetworkType;
 use emvault::core::bitcoin::Amount;
+use emvault::core::{Federation, FederationSnapshot, NetworkType};
+use emvault::elements::descriptor::to_multipath_string as ct_to_multipath_string;
+use emvault::elements::sync::KeychainKind;
+use emvault::elements::{CtDescriptorBuilder, CtKeyMode, ElementsWollet};
 use emvault::xpub::ExternalSigner;
+use rand::RngCore;
 
 use crate::AppState;
 use crate::auth::AuthUser;
@@ -82,15 +86,7 @@ pub async fn migrate_post(
     Form(body): Form<MigrationForm>,
 ) -> Result<Response, AppError> {
     let federation = load_active_current(&state, federation_id).await?;
-    // The migration subsystem is Bitcoin-only for now; a Liquid federation must
-    // not reach the BDK path below (it would fail loading a `ct(...)` descriptor
-    // into a BDK wallet). Decline cleanly until the Liquid migrate path lands.
-    if db::FederationKind::from_row(&federation).is_liquid() {
-        return Err(AppError::BadRequest(
-            "Liquid federation migration is not yet available in this build — it is in progress."
-                .to_owned(),
-        ));
-    }
+    let is_liquid = db::FederationKind::from_row(&federation).is_liquid();
     ensure_member(&state, federation_id, user.id).await?;
     ensure_no_inflight(&state, federation.lineage_id).await?;
 
@@ -140,23 +136,101 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    let built = build_federation(
-        signers,
-        threshold.get(),
-        NetworkType::Bitcoin(state.config.network),
-    )
-    .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+    // Build the successor descriptor/snapshot + the migration sweep BEFORE
+    // persisting anything, so an unfunded federation (nothing to sweep) fails
+    // cleanly without leaving a dangling pending version. The successor's
+    // destination is derived from its own descriptor — its wallet recognises the
+    // inflow once it syncs (§5.2). Both chains produce the same shape:
+    // (descriptor, snapshot, sweep_b64, proposal_json, coin_selection_json).
+    let (
+        descriptor_string,
+        snapshot_json,
+        sweep_b64,
+        sweep_proposal_json,
+        sweep_coin_selection_json,
+    ): (
+        String,
+        serde_json::Value,
+        String,
+        serde_json::Value,
+        serde_json::Value,
+    ) = if is_liquid {
+        // --- Liquid: CT successor descriptor + drain (send-max) PSET ----------
+        let elements_net = state.config.elements_network.ok_or_else(|| {
+            AppError::BadFederationInput("ELEMENTS_NETWORK not configured.".into())
+        })?;
+        // Fresh SLIP-77 master blinding key, embedded in the `ct(...)` descriptor
+        // (matches new-federation creation; per-version, server-side for dev).
+        let mut mbk = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut mbk);
+        let mut builder = CtDescriptorBuilder::new(threshold.get(), &mbk)
+            .map_err(|e| AppError::BadFederationInput(e.to_string()))?
+            .key_mode(CtKeyMode::Ranged);
+        for s in &signers {
+            builder
+                .add_signer(s)
+                .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        }
+        let ct_desc = builder
+            .build()
+            .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        let descriptor_string = ct_to_multipath_string(&ct_desc);
 
-    // Build the migration sweep transaction BEFORE persisting anything, so an
-    // unfunded federation (nothing to sweep) fails cleanly without leaving a
-    // dangling pending version. The successor's destination is derived from its
-    // descriptor — its wallet will recognise the inflow once it syncs (§5.2).
-    let destination =
-        crate::wallet::first_external_address(state.config.network, &built.descriptor_string)?;
-    let current_wallet = state.wallets.load_or_init(federation_id).await?;
-    let built_tx = current_wallet
-        .build_migration_tx(&destination, body.fee_rate)
-        .await?;
+        // Snapshot (a pure data carrier — Liquid signing is browser-side).
+        let net_type: NetworkType = elements_net.into();
+        let federation_obj = Federation::new(threshold.get(), signers, net_type).map_err(|e| {
+            AppError::BadFederationInput(format!("Cannot construct federation: {e}"))
+        })?;
+        let snapshot_json: serde_json::Value = serde_json::from_str(
+            &FederationSnapshot::from_federation(&federation_obj).to_canonical_json(),
+        )
+        .map_err(|e| AppError::BadFederationInput(format!("Failed to serialise snapshot: {e}")))?;
+
+        // Successor's first external CT address = the sweep destination.
+        let destination = ElementsWollet::from_descriptor_str(
+            &descriptor_string,
+            mbk,
+            elements_net,
+            elements_net.to_lwk(),
+        )
+        .and_then(|w| w.address(KeychainKind::External, 0))
+        .map_err(|e| {
+            AppError::BadFederationInput(format!("Cannot derive successor address: {e}"))
+        })?;
+
+        let current = state.elements_wallets.load_or_init(federation_id).await?;
+        let built = current
+            .build_migration_pset(&destination, Some(body.fee_rate))
+            .await?;
+        (
+            descriptor_string,
+            snapshot_json,
+            built.pset_b64,
+            built.proposal_json,
+            built.coin_selection_json,
+        )
+    } else {
+        // --- Bitcoin: wsh(sortedmulti) successor + BDK migration PSBT ---------
+        let built = build_federation(
+            signers,
+            threshold.get(),
+            NetworkType::Bitcoin(state.config.network),
+        )
+        .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        let destination =
+            crate::wallet::first_external_address(state.config.network, &built.descriptor_string)?;
+        let current_wallet = state.wallets.load_or_init(federation_id).await?;
+        let built_tx = current_wallet
+            .build_migration_tx(&destination, body.fee_rate)
+            .await?;
+        (
+            built.descriptor_string,
+            built.snapshot_json,
+            built_tx.psbt_b64,
+            built_tx.proposal_json,
+            built_tx.coin_selection_json,
+        )
+    };
 
     // Persist: migration record + pending successor version (no funds moved yet).
     let next_members: Vec<(Uuid, Uuid)> =
@@ -181,8 +255,8 @@ pub async fn migrate_post(
         description: None,
         label: &federation.label,
         network: &federation.network,
-        descriptor: &built.descriptor_string,
-        snapshot_json: &built.snapshot_json,
+        descriptor: &descriptor_string,
+        snapshot_json: &snapshot_json,
         version_index: federation.version_index + 1,
         next_members: &next_members,
         changes: &changes,
@@ -197,9 +271,9 @@ pub async fn migrate_post(
         federation_id,
         user.id,
         migration_id,
-        &built_tx.psbt_b64,
-        &built_tx.proposal_json,
-        &built_tx.coin_selection_json,
+        &sweep_b64,
+        &sweep_proposal_json,
+        &sweep_coin_selection_json,
     )
     .await?;
 
@@ -396,9 +470,7 @@ pub async fn federation_manage(
 
     // Migrate form: only a current signer of the active version, no in-flight
     // migration — and Bitcoin-only for now (Liquid migrate is guarded).
-    let migrate = if is_liquid {
-        None
-    } else if let Some(c) = &current {
+    let migrate = if let Some(c) = &current {
         let is_current_signer = db::find_signer_for_user_in_version(&state.db, user.id, c.id)
             .await?
             .is_some();

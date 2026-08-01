@@ -178,12 +178,22 @@ only the Bitcoin sync calls it (`wallet.rs:1131`); no Elements caller anywhere.
      the Bitcoin-only migrate form + relay/resweep buttons. build+fmt+pedantic-clippy
      green; compile-verified (not yet live-tested against a running xpub Liquid fed —
      needs the xpub app + browser-signer setup). msg: `Guard xpub migration handlers for FederationKind; render Federation tab for Liquid`
-   - **3b next:** Liquid Phase-3 migrate — build the CT successor descriptor
-     (`CtDescriptorBuilder`) + persist the pending version (mirror `migrate_post`).
-   - **3c next:** Liquid Phase-4 sweep — add a drain-PSET builder to the xpub
-     `LiquidFederationWallet` (LWK `TxBuilder` drain, not the fixed-amount
-     `build_proposal`), open the migration proposal, browser Jade `signPset` →
-     finalize → broadcast → version flip. ← *commit(s)*
+   - **3b DONE (staged):** Liquid migrate — `migrate_post` now kind-branches:
+     for Liquid it builds the CT successor descriptor (`CtDescriptorBuilder`, fresh
+     SLIP-77 mbk), derives the successor's first CT address, builds a **drain**
+     migration PSET (new `LiquidFederationWallet::build_migration_pset` using LWK
+     `drain_lbtc_wallet`/`drain_lbtc_to`), and persists the pending version +
+     migration proposal — same shape as the Bitcoin path. Migrate form un-hidden
+     for Liquid. msg: `Implement Liquid federation migration (migrate_post + drain-PSET builder)`
+   - **3c DONE (no new code needed):** the Phase-4 flow already supports Liquid —
+     sign-data returns a PSET, the client Jade `signPset` path exists, `/partial-psbt`
+     merges via `merge_partial_pset`, `finalize_and_extract` + `broadcast` have
+     Liquid branches, and the version-flip enactment (`enact_version_transition` +
+     `set_migration_complete`) is chain-agnostic DB. So a Liquid migration proposal
+     flows end-to-end through the existing proposal machinery.
+   - **Caveat:** build+fmt+pedantic-clippy green; full browser-signed e2e not
+     headless-testable (needs a Jade + the xpub device-onboarding flow). Every seam
+     is a direct mirror of proven code (regular Liquid send) or chain-agnostic. ← *commit*
 4. **xpub: max-spend + Send-Max for Liquid**; **address-detail for Liquid**. ← *commit*
 5. **xpub: wire the RPC Elements backend** (`ElementsChainBackend::Rpc`), so xpub
    has the full 4-backend matrix. ← *commit*
