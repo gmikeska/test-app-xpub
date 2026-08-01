@@ -82,6 +82,15 @@ pub async fn migrate_post(
     Form(body): Form<MigrationForm>,
 ) -> Result<Response, AppError> {
     let federation = load_active_current(&state, federation_id).await?;
+    // The migration subsystem is Bitcoin-only for now; a Liquid federation must
+    // not reach the BDK path below (it would fail loading a `ct(...)` descriptor
+    // into a BDK wallet). Decline cleanly until the Liquid migrate path lands.
+    if db::FederationKind::from_row(&federation).is_liquid() {
+        return Err(AppError::BadRequest(
+            "Liquid federation migration is not yet available in this build — it is in progress."
+                .to_owned(),
+        ));
+    }
     ensure_member(&state, federation_id, user.id).await?;
     ensure_no_inflight(&state, federation.lineage_id).await?;
 
@@ -296,6 +305,7 @@ struct MigrateFormView {
 /// - [`AppError::NotFound`] if the federation doesn't exist.
 /// - [`AppError::Forbidden`] if the viewer isn't a member of `{id}`.
 /// - Any underlying SQL/wallet error.
+#[allow(clippy::too_many_lines)]
 pub async fn federation_manage(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
@@ -305,19 +315,39 @@ pub async fn federation_manage(
     let (header, cosigners) = load_header(&state, federation_id, user.id).await?;
     let lineage_id = header.lineage_id;
 
-    // Balance for the header (the page's version).
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    let sync = fw.sync().await?;
+    // The tab renders for both chains; the migrate/relay/resweep *actions* are
+    // Bitcoin-only for now (guarded in their handlers + hidden below for Liquid).
+    let is_liquid = header.is_liquid;
+
+    // Balance for the header (the page's version) — LWK for Liquid, BDK for BTC.
     let reserved = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
-    let balance = BalanceView::from_balance(&fw.balance().await, reserved);
-    let federation = FederationView {
-        tip_height: sync.tip_height,
-        ..header
+    let (federation, balance) = if is_liquid {
+        let fw = state.elements_wallets.load_or_init(federation_id).await?;
+        let sync = fw.sync().await?;
+        let lbtc_sat = fw.lbtc_balance_sat().await?;
+        (
+            FederationView {
+                tip_height: sync.tip_height,
+                ..header
+            },
+            BalanceView::from_lbtc_sat(lbtc_sat, reserved),
+        )
+    } else {
+        let fw = state.wallets.load_or_init(federation_id).await?;
+        let sync = fw.sync().await?;
+        (
+            FederationView {
+                tip_height: sync.tip_height,
+                ..header
+            },
+            BalanceView::from_balance(&fw.balance().await, reserved),
+        )
     };
 
     // Version history. Freshen all versions (best-effort — a node outage
-    // shouldn't hide the history).
-    if let Err(e) = state.wallets.sync_lineage(lineage_id).await {
+    // shouldn't hide the history). BDK-only; the Liquid per-version balances are
+    // read individually below.
+    if !is_liquid && let Err(e) = state.wallets.sync_lineage(lineage_id).await {
         tracing::warn!(error = %e, %lineage_id, "lineage sync failed; rendering cached balances");
     }
     // Versions the viewer may see: a current signer sees all of them; an
@@ -328,8 +358,16 @@ pub async fn federation_manage(
 
     let mut version_views = Vec::with_capacity(versions.len());
     for v in &versions {
-        let wallet = state.wallets.load_or_init(v.id).await?;
-        let bal = wallet.balance().await.total();
+        // Per-version balance: LWK sat total for Liquid, BDK for Bitcoin.
+        let (bal_sat, has_funds) = if is_liquid {
+            let w = state.elements_wallets.load_or_init(v.id).await?;
+            let s = w.lbtc_balance_sat().await?;
+            (s, s > 0)
+        } else {
+            let w = state.wallets.load_or_init(v.id).await?;
+            let b = w.balance().await.total();
+            (b.to_sat(), b > Amount::ZERO)
+        };
         let viewer_can_sign = db::find_signer_for_user_in_version(&state.db, user.id, v.id)
             .await?
             .is_some();
@@ -339,23 +377,28 @@ pub async fn federation_manage(
             version_index: v.version_index,
             status: v.status.clone(),
             is_current,
-            balance_btc: format!("{:.8}", bal.to_btc()),
+            balance_btc: format!("{:.8}", Amount::from_sat(bal_sat).to_btc()),
             viewer_can_sign,
             // Relay is only offered on a funded superseded version the viewer can
-            // actually sign for (so a current signer doesn't see a relay button on
-            // a historic version they can't sign).
-            relay_available: !is_current && bal > Amount::ZERO && viewer_can_sign,
+            // actually sign for. Liquid relay is not yet available (guarded), so
+            // never offer the button for a Liquid federation.
+            relay_available: !is_liquid && !is_current && has_funds && viewer_can_sign,
             // Re-sweep is offered on a superseded version whose migration a reorg
             // reverted (migration_status = 'pending'), for a viewer who can sign
-            // it. Not balance-gated: the funds are stranded under the unconfirmed
-            // old sweep, so the reverted version reads a zero spendable balance.
-            resweep_available: !is_current && v.migration_status == "pending" && viewer_can_sign,
+            // it. Also Bitcoin-only for now.
+            resweep_available: !is_liquid
+                && !is_current
+                && v.migration_status == "pending"
+                && viewer_can_sign,
             migration_status: v.migration_status.clone(),
         });
     }
 
-    // Migrate form: only a current signer of the active version, no in-flight migration.
-    let migrate = if let Some(c) = &current {
+    // Migrate form: only a current signer of the active version, no in-flight
+    // migration — and Bitcoin-only for now (Liquid migrate is guarded).
+    let migrate = if is_liquid {
+        None
+    } else if let Some(c) = &current {
         let is_current_signer = db::find_signer_for_user_in_version(&state.db, user.id, c.id)
             .await?
             .is_some();
@@ -452,6 +495,12 @@ pub async fn relay_post(
             "Relay applies to a superseded version; use Send on the current version.".to_owned(),
         ));
     }
+    if db::FederationKind::from_row(&source).is_liquid() {
+        return Err(AppError::BadRequest(
+            "Liquid federation relay is not yet available in this build — it is in progress."
+                .to_owned(),
+        ));
+    }
     ensure_member(&state, federation_id, user.id).await?;
 
     let current = db::current_version_for_lineage(&state.db, source.lineage_id)
@@ -540,6 +589,12 @@ pub async fn resweep_post(
     if source.migration_status != "pending" {
         return Err(AppError::BadRequest(
             "Re-sweep applies only to a migration a reorg reverted (status pending).".to_owned(),
+        ));
+    }
+    if db::FederationKind::from_row(&source).is_liquid() {
+        return Err(AppError::BadRequest(
+            "Liquid federation re-sweep is not yet available in this build — it is in progress."
+                .to_owned(),
         ));
     }
     ensure_member(&state, federation_id, user.id).await?;

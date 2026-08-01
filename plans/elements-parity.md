@@ -104,6 +104,16 @@ share one client/feature (`esplora`), differing only by constructor.
 
 **DoD test:** every Matrix-A Liquid feature run once per backend, both apps.
 
+**⚠️ Waterfalls testability blocker:** waterfalls is Blockstream QuickSync
+(enterprise tier, no regtest/signet) and our local electrs-esplora does not serve
+the waterfalls descriptor endpoint. So rpc/electrum/esplora are testable on the
+regtest stack today; **waterfalls needs a dedicated server** — either the OSS
+`waterfalls` daemon pointed at our regtest esplora/electrs, or the Blockstream
+enterprise endpoint (was out of credits earlier). Decision needed before the
+waterfalls column of the DoD can go green.
+(Also fixed in passing: dev `.env` `ELEMENTS_ESPLORA_URL` pointed at the testnet4
+electrs `:3111`; corrected to the regtest esplora REST `:3112`.)
+
 ---
 
 ## Matrix C — crate parity (`emvault-core` Bitcoin vs `emvault-elements`)
@@ -145,15 +155,35 @@ only the Bitcoin sync calls it (`wallet.rs:1131`); no Elements caller anywhere.
 ## Workstream (ordered; each step = a commit checkpoint Greg lands)
 
 0. **[this doc]** audit + matrices + DoD. ← *commit 1*
-1. **Backend-matrix e2e harness** — backend-parametrized `fund→receive→send→
-   migrate→resweep` Liquid loop (RPC/Esplora/Waterfalls/Electrum). Gives us the
-   DoD gate to run each later step against. ← *commit*
+1. **Backend-matrix e2e harness** — DONE (v1): `test-app-pkcs11/scripts/
+   elements_backend_matrix.py` drives the running app through `fund → sync →
+   balance → max-spend → signed send → node-receives` per backend (swaps
+   `ELEMENTS_CHAIN_BACKEND`, restarts, asserts deltas). **Proven green live
+   2026-08-01: rpc ✅ · electrum ✅ · esplora ✅.** Waterfalls skips pending a
+   server (see caveat). Grows to cover migrate/resweep as those land. ← *commit*
 2. **Crate: roster + migration-planning for Elements** (`emvault-elements`) —
-   port/mirror `emvault-core::{roster, migration}` (SweepAlgorithm, MigrationPlan,
-   batched sweep) so the app migration handlers have a real planning layer. ← *commit*
-3. **xpub: Liquid migration subsystem** — kind-branch `migrations.rs` (migrate,
-   federation/lineage tab, relay, resweep) onto `elements_wallets`; add the
-   `FederationKind` guard + graceful UI. Port from pkcs11 semantics. ← *commit(s)*
+   DONE. `roster` is chain-agnostic → **reused directly** via `pub use
+   emvault_core::roster` (no duplication). New `migration.rs`: Elements-typed
+   `ElementsSweepAlgorithm` + `ElementsMigrationPlan`/`SweepOutput`/
+   `SweepTransaction`/`AccountUtxoSet` + `ElementsAccountForAccountSweep` and
+   `…BatchedSweep` (mirrors core's arithmetic; fees in u64 sat via the proven
+   `estimate_elements_fee_sat`). 5 unit tests + build + fmt + pedantic clippy
+   green. Planning-only (consumer builds the PSET via `build_migration_pset`).
+   Uncommitted (Greg commits). ← *commit* — msg: `Add Elements roster reuse + migration-planning layer (SweepAlgorithm/MigrationPlan)` ← next up: step 3 wires this into the xpub app.
+3. **xpub: Liquid migration subsystem** — in sub-steps:
+   - **3a DONE (staged):** `FederationKind` guard across `migrations.rs`. The
+     migrate/relay/resweep POSTs now decline Liquid cleanly (was: raw BDK error
+     loading a `ct(...)` descriptor into BDK); the Federation tab (`federation_manage`)
+     renders Liquid via LWK (`elements_wallets` balances + version history) and hides
+     the Bitcoin-only migrate form + relay/resweep buttons. build+fmt+pedantic-clippy
+     green; compile-verified (not yet live-tested against a running xpub Liquid fed —
+     needs the xpub app + browser-signer setup). msg: `Guard xpub migration handlers for FederationKind; render Federation tab for Liquid`
+   - **3b next:** Liquid Phase-3 migrate — build the CT successor descriptor
+     (`CtDescriptorBuilder`) + persist the pending version (mirror `migrate_post`).
+   - **3c next:** Liquid Phase-4 sweep — add a drain-PSET builder to the xpub
+     `LiquidFederationWallet` (LWK `TxBuilder` drain, not the fixed-amount
+     `build_proposal`), open the migration proposal, browser Jade `signPset` →
+     finalize → broadcast → version flip. ← *commit(s)*
 4. **xpub: max-spend + Send-Max for Liquid**; **address-detail for Liquid**. ← *commit*
 5. **xpub: wire the RPC Elements backend** (`ElementsChainBackend::Rpc`), so xpub
    has the full 4-backend matrix. ← *commit*
