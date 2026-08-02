@@ -33,10 +33,15 @@ const JADE_USB_FILTERS = [
 ];
 
 // Allowlist for the auth-handshake `http_request` URL the device returns.
-// Jade points at Blockstream's pinserver in production. The Tor onion
-// alternative is documented in the Jade docs but isn't browser-fetchable,
-// so we reject it.
-const PINSERVER_URL_PREFIXES = ["https://jadepin.blockstream.com/"];
+// Jade points at Blockstream's pinserver in production. Current firmware uses
+// the shortened `https://j8d.io` domain; older firmware used the full
+// `https://jadepin.blockstream.com` — both are the same Blockstream service,
+// so we allow either. The Tor onion alternative is documented in the Jade
+// docs but isn't browser-fetchable, so we reject it.
+const PINSERVER_URL_PREFIXES = [
+    "https://j8d.io/",
+    "https://jadepin.blockstream.com/",
+];
 
 // BIP-32 hardened-derivation mask. JS bitwise ops are 32-bit signed, so
 // we reach for the literal value instead of `(1 << 31)`.
