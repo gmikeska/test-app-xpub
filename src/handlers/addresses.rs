@@ -99,6 +99,7 @@ pub async fn show(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path((federation_id, address_raw)): Path<(Uuid, String)>,
+    axum::extract::Query(cq): axum::extract::Query<crate::handlers::federations::ChainQuery>,
 ) -> Result<Response, AppError> {
     let row = db::find_federation_by_id(&state.db, federation_id)
         .await?
@@ -120,7 +121,9 @@ pub async fn show(
     // unconfidential address, derivation index, QR, and real per-address
     // received/unspent + receipts reconstructed from LWK's index-stamped
     // wallet outputs — full parity with the Bitcoin path.
-    if FederationKind::from_row(&row) == FederationKind::Liquid {
+    if crate::handlers::federations::resolve_active_chain(&row, cq.chain.as_deref())
+        == FederationKind::Liquid
+    {
         return render_liquid_address_detail(&state, user.email, row, &address_raw).await;
     }
 

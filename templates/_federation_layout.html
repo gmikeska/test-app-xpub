@@ -4,6 +4,13 @@
 
 {% block nav %}
   <span class="user">{{ email }}</span>
+  {% if federation.elements_capable %}
+    {% if federation.is_liquid %}
+      <a href="/federations/{{ federation.id }}/receive" class="link chain-switch">BTC Wallet</a>
+    {% else %}
+      <a href="/federations/{{ federation.id }}/receive?chain=elements" class="link chain-switch">Elements Wallet</a>
+    {% endif %}
+  {% endif %}
   <form method="post" action="/logout" class="inline-form">
     <button type="submit" class="link">Log out</button>
   </form>
@@ -14,7 +21,11 @@
   <div class="crumbs"><a href="/home">← Back to your federations</a></div>
   <h1>
     {{ federation.label }}
-    <span class="badge {{ federation.network }}">{{ federation.network }}</span>
+    {% if federation.is_liquid %}
+      <span class="badge liquid">Elements</span>
+    {% else %}
+      <span class="badge {{ federation.network }}">{{ federation.network }}</span>
+    {% endif %}
   </h1>
   <dl class="kv-grid">
     <dt>Policy</dt>
@@ -97,11 +108,11 @@
 
 <nav class="tabs">
   <a class="tab {% if active_tab == "receive" %}active{% endif %}"
-     href="/federations/{{ federation.id }}/receive">Receive</a>
+     href="/federations/{{ federation.id }}/receive{{ federation.chain_qs }}">Receive</a>
   <a class="tab {% if active_tab == "send" %}active{% endif %}"
-     href="/federations/{{ federation.id }}/send">Send</a>
+     href="/federations/{{ federation.id }}/send{{ federation.chain_qs }}">Send</a>
   <a class="tab {% if active_tab == "federation" %}active{% endif %}"
-     href="/federations/{{ federation.id }}/federation">Federation</a>
+     href="/federations/{{ federation.id }}/federation{{ federation.chain_qs }}">Federation</a>
 </nav>
 
 {% block tab_body %}{% endblock %}

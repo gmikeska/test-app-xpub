@@ -258,20 +258,30 @@ impl LwkWalletManager {
             .network
             .ok_or(ElementsWalletError::NetworkUnconfigured)?;
 
-        let row_network = parse_row_network(&row.network).ok_or_else(|| {
-            ElementsWalletError::NetworkMismatch {
-                id: federation_id,
-                stored: row.network.clone(),
+        // Dual-chain federations are Bitcoin-networked and carry the Elements
+        // confidential descriptor in `elements_descriptor`; the Elements
+        // network is the server's `ELEMENTS_NETWORK`. Legacy Liquid-only
+        // federations instead stored the `ct(...)` descriptor in `descriptor`
+        // with a Liquid `network` — those still get the network match check.
+        let ct_descriptor_str = if let Some(ed) = row.elements_descriptor.as_deref() {
+            ed
+        } else {
+            let row_network = parse_row_network(&row.network).ok_or_else(|| {
+                ElementsWalletError::NetworkMismatch {
+                    id: federation_id,
+                    stored: row.network.clone(),
+                }
+            })?;
+            if row_network != server_network {
+                return Err(ElementsWalletError::NetworkMismatch {
+                    id: federation_id,
+                    stored: row.network.clone(),
+                });
             }
-        })?;
-        if row_network != server_network {
-            return Err(ElementsWalletError::NetworkMismatch {
-                id: federation_id,
-                stored: row.network.clone(),
-            });
-        }
+            &row.descriptor
+        };
 
-        let descriptor = WolletDescriptor::from_str(&row.descriptor).map_err(|e| {
+        let descriptor = WolletDescriptor::from_str(ct_descriptor_str).map_err(|e| {
             ElementsWalletError::BadDescriptor {
                 id: federation_id,
                 reason: e.to_string(),

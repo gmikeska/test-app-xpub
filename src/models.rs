@@ -62,9 +62,15 @@ pub struct FederationRow {
     ///
     /// Use [`crate::db::FederationKind::from_network_str`] to discriminate.
     pub network: String,
-    /// `wsh(sortedmulti(...))` (Bitcoin) or
-    /// `ct(slip77(...), elwsh(sortedmulti(...)))` (Liquid) descriptor.
+    /// The Bitcoin `wsh(sortedmulti(...))` descriptor. (Legacy Liquid-only
+    /// federations from before the dual-chain model stored a
+    /// `ct(slip77(...), elwsh(sortedmulti(...)))` descriptor here instead.)
     pub descriptor: String,
+    /// The Elements confidential descriptor `ct(slip77(mbk), elwsh(...))`,
+    /// materialized at creation when every cosigner device is a Jade. `None`
+    /// for Bitcoin-only federations. Its presence marks the federation as
+    /// Elements-capable and drives the Bitcoin<->Elements toggle.
+    pub elements_descriptor: Option<String>,
     /// Canonical `FederationSnapshot` JSON.
     pub snapshot_json: serde_json::Value,
     /// JSON-encoded `bdk_wallet::ChangeSet`. `None` until the federation's

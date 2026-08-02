@@ -398,8 +398,11 @@ pub async fn detail(
         "/home".to_string()
     };
 
+    // Proposal detail renders on the federation's base (Bitcoin) chain header
+    // for now; per-proposal chain tagging (Elements PSET proposals) lands with
+    // the Elements-transacting batch.
     let (federation, _cosigners) =
-        crate::handlers::federations::build_header_views(&state, row, user.id).await?;
+        crate::handlers::federations::build_header_views(&state, row, user.id, None).await?;
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
     let proposer = db::find_user_by_id(&state.db, proposal.proposed_by)
         .await?

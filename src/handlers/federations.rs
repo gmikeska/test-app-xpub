@@ -50,12 +50,20 @@ pub struct FederationView {
     pub descriptor: String,
     pub created_at: String,
     pub tip_height: u32,
-    /// `true` iff this federation is on a Liquid (Elements) network.
-    /// Drives `BTC` vs `L-BTC` labels and Liquid-specific UI affordances
-    /// (no per-address detail page, no coin-selection breakdown, etc.).
+    /// `true` iff the **active view** is Liquid (Elements). For a dual-chain
+    /// federation this follows the `?chain=` toggle, not the row's own network.
+    /// Drives `BTC` vs `L-BTC` labels and Liquid-specific UI affordances.
     pub is_liquid: bool,
     /// Currency ticker shown in amount columns (`"BTC"` or `"L-BTC"`).
     pub asset_ticker: String,
+    /// `true` iff this federation carries an Elements descriptor (all-Jade),
+    /// so the Bitcoin<->Elements toggle should be offered.
+    pub elements_capable: bool,
+    /// The active chain of this view: `"bitcoin"` or `"elements"`.
+    pub active_chain: String,
+    /// Query-string suffix that preserves the active chain across tab links:
+    /// `"?chain=elements"` when viewing Elements, empty otherwise.
+    pub chain_qs: String,
 }
 
 /// View-model for one cosigner row.
@@ -246,17 +254,19 @@ pub async fn receive(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
+    axum::extract::Query(cq): axum::extract::Query<ChainQuery>,
 ) -> Result<Response, AppError> {
-    let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
+    let (federation, cosigners) =
+        load_header(&state, federation_id, user.id, cq.chain.as_deref()).await?;
 
     // Show addresses for every version the viewer may see (newest first), as
     // tabs; default to the version they navigated to (`federation_id`). A current
     // signer sees all versions (view-only on historic ones); an old-only signer
     // sees only theirs. The header card reflects the navigated version.
     //
-    // The lineage is chain-homogeneous, so the receive pipeline (BDK for
-    // Bitcoin, LWK for Liquid) is selected once from the header view.
-    let is_liquid = matches!(federation_kind(&federation), FederationKind::Liquid);
+    // The active chain (Bitcoin vs the Elements toggle) selects the receive
+    // pipeline (BDK vs LWK).
+    let is_liquid = federation.is_liquid;
     let visible = db::visible_versions_for_user(&state.db, federation.lineage_id, user.id).await?;
 
     let mut federation_groups = Vec::with_capacity(visible.len());
@@ -354,8 +364,10 @@ pub async fn send(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
+    axum::extract::Query(cq): axum::extract::Query<ChainQuery>,
 ) -> Result<Response, AppError> {
-    let (federation, cosigners) = load_header(&state, federation_id, user.id).await?;
+    let (federation, cosigners) =
+        load_header(&state, federation_id, user.id, cq.chain.as_deref()).await?;
 
     let (federation, balance) = match federation_kind(&federation) {
         FederationKind::Bitcoin => {
@@ -474,6 +486,7 @@ pub async fn load_header(
     state: &Arc<AppState>,
     federation_id: Uuid,
     user_id: Uuid,
+    chain: Option<&str>,
 ) -> Result<(FederationView, Vec<CosignerView>), AppError> {
     let row = db::find_federation_by_id(&state.db, federation_id)
         .await?
@@ -483,7 +496,7 @@ pub async fn load_header(
         return Err(AppError::Forbidden);
     }
 
-    build_header_views(state, row, user_id).await
+    build_header_views(state, row, user_id, chain).await
 }
 
 /// Build the shared header view-models (federation card + cosigner roster) from
@@ -494,6 +507,7 @@ pub(crate) async fn build_header_views(
     state: &Arc<AppState>,
     row: FederationRow,
     user_id: Uuid,
+    chain: Option<&str>,
 ) -> Result<(FederationView, Vec<CosignerView>), AppError> {
     let members = db::list_federation_members_with_signers(&state.db, row.id).await?;
     let cosigners = members
@@ -501,9 +515,10 @@ pub(crate) async fn build_header_views(
         .map(|(u, s)| build_cosigner_view(&u.email, s, user_id == u.id))
         .collect::<Vec<_>>();
 
-    let kind = FederationKind::from_row(&row);
-    let is_liquid = kind.is_liquid();
+    let active_chain = resolve_active_chain(&row, chain);
+    let is_liquid = active_chain.is_liquid();
     let asset_ticker = if is_liquid { "L-BTC" } else { "BTC" }.to_string();
+    let elements_capable = row.elements_descriptor.is_some();
     let federation = FederationView {
         id: row.id,
         lineage_id: row.lineage_id,
@@ -520,9 +535,36 @@ pub(crate) async fn build_header_views(
             .unwrap_or(0),
         is_liquid,
         asset_ticker,
+        elements_capable,
+        active_chain: if is_liquid { "elements" } else { "bitcoin" }.to_string(),
+        chain_qs: if is_liquid { "?chain=elements" } else { "" }.to_string(),
     };
 
     Ok((federation, cosigners))
+}
+
+/// Query params carrying the active-chain toggle on every federation view.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ChainQuery {
+    /// `"elements"` selects the Liquid view of a dual-chain federation;
+    /// anything else (or absent) is the default Bitcoin view.
+    pub chain: Option<String>,
+}
+
+/// Resolve the active chain for a federation view: Elements iff the caller
+/// asked for it **and** the federation actually carries an Elements descriptor
+/// (all-Jade); otherwise Bitcoin. Legacy Liquid-only rows (Liquid `network`,
+/// no `elements_descriptor`) resolve to Liquid regardless.
+#[must_use]
+pub fn resolve_active_chain(row: &FederationRow, chain: Option<&str>) -> FederationKind {
+    if FederationKind::from_row(row).is_liquid() {
+        return FederationKind::Liquid;
+    }
+    if chain == Some("elements") && row.elements_descriptor.is_some() {
+        FederationKind::Liquid
+    } else {
+        FederationKind::Bitcoin
+    }
 }
 
 /// A viewer's signing relationship to a lineage's **current** version.

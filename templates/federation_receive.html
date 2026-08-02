@@ -51,7 +51,7 @@
             <tr>
               <td>{{ a.index }}</td>
               <td>
-                <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
+                <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}{{ federation.chain_qs }}">
                   <code class="break">{{ a.address }}</code>
                 </a>
               </td>

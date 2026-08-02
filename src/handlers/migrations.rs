@@ -136,11 +136,103 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    // Build the successor descriptor/snapshot + the migration sweep BEFORE
-    // persisting anything, so an unfunded federation (nothing to sweep) fails
-    // cleanly without leaving a dangling pending version. The successor's
-    // destination is derived from its own descriptor — its wallet recognises the
-    // inflow once it syncs (§5.2). Both chains produce the same shape:
+    // A federation may hold funds on only one chain (e.g. Liquid funded,
+    // Bitcoin empty). Migrating the *empty* chain has nothing to sweep, so it
+    // becomes a pure version bump: mint the successor and enact the version flip
+    // immediately — no sweep transaction, no proposal to sign.
+    let has_funds = if is_liquid {
+        let w = state.elements_wallets.load_or_init(federation_id).await?;
+        w.sync().await?;
+        w.lbtc_balance_sat().await? > 0
+    } else {
+        let w = state.wallets.load_or_init(federation_id).await?;
+        w.sync().await?;
+        w.balance().await.total().to_sat() > 0
+    };
+    if !has_funds {
+        let (descriptor_string, snapshot_json) = if is_liquid {
+            let elements_net = state.config.elements_network.ok_or_else(|| {
+                AppError::BadFederationInput("ELEMENTS_NETWORK not configured.".into())
+            })?;
+            let mut mbk = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut mbk);
+            let mut builder = CtDescriptorBuilder::new(threshold.get(), &mbk)
+                .map_err(|e| AppError::BadFederationInput(e.to_string()))?
+                .key_mode(CtKeyMode::Ranged);
+            for s in &signers {
+                builder
+                    .add_signer(s)
+                    .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+            }
+            let ct_desc = builder
+                .build()
+                .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+            let descriptor_string = ct_to_multipath_string(&ct_desc);
+            let net_type: NetworkType = elements_net.into();
+            let federation_obj =
+                Federation::new(threshold.get(), signers, net_type).map_err(|e| {
+                    AppError::BadFederationInput(format!("Cannot construct federation: {e}"))
+                })?;
+            let snapshot_json: serde_json::Value = serde_json::from_str(
+                &FederationSnapshot::from_federation(&federation_obj).to_canonical_json(),
+            )
+            .map_err(|e| {
+                AppError::BadFederationInput(format!("Failed to serialise snapshot: {e}"))
+            })?;
+            (descriptor_string, snapshot_json)
+        } else {
+            let built = build_federation(
+                signers,
+                threshold.get(),
+                NetworkType::Bitcoin(state.config.network),
+            )
+            .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+            (built.descriptor_string, built.snapshot_json)
+        };
+
+        let next_members: Vec<(Uuid, Uuid)> =
+            resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
+        let changes: Vec<(Uuid, Option<Uuid>, &str)> = plan
+            .changes
+            .iter()
+            .map(|(uid, action)| {
+                let signer_id = match action {
+                    RosterAction::Keep | RosterAction::Add => next_signer.get(uid).copied(),
+                    RosterAction::Remove => current_signer.get(uid).copied().flatten(),
+                };
+                (*uid, signer_id, action.as_str())
+            })
+            .collect();
+        let spec = NewPendingMigration {
+            lineage_id: federation.lineage_id,
+            base_version_id: federation_id,
+            proposed_by: user.id,
+            next_threshold: body.threshold,
+            description: None,
+            label: &federation.label,
+            network: &federation.network,
+            descriptor: &descriptor_string,
+            snapshot_json: &snapshot_json,
+            version_index: federation.version_index + 1,
+            next_members: &next_members,
+            changes: &changes,
+        };
+        let (migration_id, pending_id) = db::create_pending_migration(&state.db, &spec).await?;
+        // Nothing to move → enact the version flip now (base is left with its
+        // default `not_applicable` migration status; no sweep to reconcile).
+        db::enact_version_transition(&state.db, pending_id, federation_id, migration_id).await?;
+        tracing::info!(
+            %migration_id, %pending_id, lineage = %federation.lineage_id, proposer = %user.email,
+            "federation migration enacted with no sweep (unfunded version bump)"
+        );
+        return Ok(Redirect::to(&format!("/federations/{pending_id}/federation")).into_response());
+    }
+
+    // Funded path: build the successor descriptor/snapshot + the migration sweep
+    // BEFORE persisting anything, so a build failure leaves no dangling pending
+    // version. The successor's destination is derived from its own descriptor —
+    // its wallet recognises the inflow once it syncs (§5.2). Both chains produce
+    // the same shape:
     // (descriptor, snapshot, sweep_b64, proposal_json, coin_selection_json).
     let (
         descriptor_string,
@@ -384,9 +476,11 @@ pub async fn federation_manage(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
+    axum::extract::Query(cq): axum::extract::Query<crate::handlers::federations::ChainQuery>,
 ) -> Result<Response, AppError> {
     // Header + membership check for the page's version.
-    let (header, cosigners) = load_header(&state, federation_id, user.id).await?;
+    let (header, cosigners) =
+        load_header(&state, federation_id, user.id, cq.chain.as_deref()).await?;
     let lineage_id = header.lineage_id;
 
     // The tab renders for both chains; the migrate/relay/resweep *actions* are

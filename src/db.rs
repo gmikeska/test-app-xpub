@@ -246,10 +246,13 @@ pub struct NewFederation<'a> {
     /// `/<0;1>/*`; Liquid uses
     /// `ct(slip77(<key>), elwsh(sortedmulti(m, ...)))` with `/<0;1>/*`.
     pub descriptor: &'a str,
+    /// Elements confidential descriptor `ct(slip77(mbk), elwsh(...))`. `Some(_)`
+    /// when the federation is Elements-capable (all-Jade); `None` otherwise.
+    pub elements_descriptor: Option<&'a str>,
     /// Canonical `FederationSnapshot` JSON.
     pub snapshot_json: &'a JsonValue,
-    /// 32-byte SLIP-77 master blinding key. `Some(_)` for Liquid federations,
-    /// `None` for Bitcoin.
+    /// 32-byte SLIP-77 master blinding key. `Some(_)` for Elements-capable
+    /// federations, `None` for Bitcoin-only.
     pub master_blinding_key: Option<&'a [u8; 32]>,
 }
 
@@ -314,9 +317,9 @@ pub async fn insert_federation_with_members(
     let mbk_bytes: Option<&[u8]> = spec.master_blinding_key.map(|k| &k[..]);
     sqlx::query(
         "INSERT INTO federations \
-            (id, lineage_id, label, threshold, total_signers, network, descriptor, snapshot_json, \
-             master_blinding_key) \
-         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8)",
+            (id, lineage_id, label, threshold, total_signers, network, descriptor, \
+             elements_descriptor, snapshot_json, master_blinding_key) \
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(federation_id)
     .bind(spec.label)
@@ -324,6 +327,7 @@ pub async fn insert_federation_with_members(
     .bind(spec.total_signers)
     .bind(spec.network)
     .bind(spec.descriptor)
+    .bind(spec.elements_descriptor)
     .bind(spec.snapshot_json)
     .bind(mbk_bytes)
     .execute(&mut *tx)
@@ -359,7 +363,7 @@ pub async fn list_federations_for_user(
 ) -> sqlx::Result<Vec<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT f.id, f.label, f.threshold, f.total_signers, f.network, \
-                f.descriptor, f.snapshot_json, f.bdk_changeset, \
+                f.descriptor, f.elements_descriptor, f.snapshot_json, f.bdk_changeset, \
                 f.chain_tip_height, f.lineage_id, f.version_index, \
                 f.predecessor_id, f.status, f.migration_status, \
                 f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
@@ -382,8 +386,8 @@ pub async fn list_federations_for_user(
 pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT id, label, threshold, total_signers, network, descriptor, \
-                snapshot_json, bdk_changeset, chain_tip_height, lineage_id, \
-                version_index, predecessor_id, status, migration_status, \
+                elements_descriptor, snapshot_json, bdk_changeset, chain_tip_height, \
+                lineage_id, version_index, predecessor_id, status, migration_status, \
                 migration_sweep_txid, migration_sweep_confirmed_height, \
                 master_blinding_key, next_external_index, next_internal_index, \
                 created_at \
@@ -928,7 +932,7 @@ mod versioning {
     use uuid::Uuid;
 
     const FEDERATION_COLS: &str = "id, label, threshold, total_signers, network, descriptor, \
-     migration_sweep_confirmed_height, \
+     elements_descriptor, migration_sweep_confirmed_height, \
      snapshot_json, bdk_changeset, chain_tip_height, lineage_id, version_index, \
      predecessor_id, status, migration_status, migration_sweep_txid, \
      master_blinding_key, next_external_index, next_internal_index, created_at";
@@ -1103,8 +1107,8 @@ mod versioning {
         sqlx::query_as::<_, FederationRow>(
             "SELECT DISTINCT ON (f.lineage_id) \
                     f.id, f.label, f.threshold, f.total_signers, f.network, f.descriptor, \
-                    f.snapshot_json, f.bdk_changeset, f.chain_tip_height, f.lineage_id, \
-                    f.version_index, f.predecessor_id, f.status, f.migration_status, \
+                    f.elements_descriptor, f.snapshot_json, f.bdk_changeset, f.chain_tip_height, \
+                    f.lineage_id, f.version_index, f.predecessor_id, f.status, f.migration_status, \
                     f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
                     f.master_blinding_key, f.next_external_index, f.next_internal_index, \
                     f.created_at \

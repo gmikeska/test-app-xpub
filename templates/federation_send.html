@@ -1,6 +1,12 @@
 {% extends "_federation_layout.html" %}
 
 {% block tab_body %}
+{% if federation.is_liquid && federation.elements_capable %}
+<section class="card">
+  <h2>New proposal</h2>
+  <p class="muted">You're viewing this federation on <strong>Elements</strong>. Sending on the Elements side via the chain toggle is coming in the next update — balances, receive addresses and address detail are live. To transact, <a href="/federations/{{ federation.id }}/send">switch to Bitcoin</a>.</p>
+</section>
+{% else %}
 <section class="card">
   <h2>New proposal</h2>
   {% if federation.is_liquid %}
@@ -86,6 +92,7 @@
     </div>
   </form>
 </section>
+{% endif %}
 
 <section class="card">
   <h2>Proposals</h2>
