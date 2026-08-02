@@ -176,14 +176,6 @@ pub async fn migrate_post(
         let ele_wallet = state.elements_wallets.load_or_init(federation_id).await?;
         ele_wallet.sync().await?;
         let lbtc_sat = ele_wallet.lbtc_balance_sat().await?;
-        if btc_sat > 0 && lbtc_sat > 0 {
-            return Err(AppError::BadRequest(
-                "This vault holds funds on both Bitcoin and Elements. Migrating a vault funded \
-                 on both chains at once isn't supported yet — move the funds onto one chain \
-                 first, then migrate."
-                    .to_owned(),
-            ));
-        }
 
         // Persist the pending successor carrying BOTH descriptors.
         let next_members: Vec<(Uuid, Uuid)> =
@@ -216,9 +208,15 @@ pub async fn migrate_post(
         };
         let (migration_id, pending_id) = db::create_pending_migration(&state.db, &spec).await?;
 
-        // Sweep the funded chain (if any) to the successor. Broadcasting the
-        // sweep enacts the version flip (chain-agnostic, in the broadcast
-        // handler). An unfunded vault version-bumps immediately.
+        // Open a sweep proposal for EACH funded chain against this one migration.
+        // Both target the same successor version; the user signs each on its own
+        // chain view. Broadcasting the first sweep enacts the version flip
+        // (chain-agnostic, idempotent in the broadcast handler — the second sweep
+        // just moves its funds, since `migration_enactment_for_proposal` stops
+        // firing once the migration is `enacted`). An unfunded vault version-bumps
+        // immediately. We redirect to the first sweep built (Elements when both).
+        let mut first_proposal: Option<Uuid> = None;
+
         if lbtc_sat > 0 {
             let destination = ElementsWollet::from_descriptor_str(
                 &elements_descriptor,
@@ -246,12 +244,9 @@ pub async fn migrate_post(
             .await?;
             tracing::info!(
                 %migration_id, %pending_id, %proposal_id, chain = "elements",
-                "dual-chain migration opened (Elements sweep PSET)"
+                "dual-chain migration: Elements sweep PSET opened"
             );
-            return Ok(Redirect::to(&format!(
-                "/federations/{federation_id}/proposals/{proposal_id}"
-            ))
-            .into_response());
+            first_proposal.get_or_insert(proposal_id);
         }
         if btc_sat > 0 {
             let destination = crate::wallet::first_external_address(
@@ -274,14 +269,19 @@ pub async fn migrate_post(
             .await?;
             tracing::info!(
                 %migration_id, %pending_id, %proposal_id, chain = "bitcoin",
-                "dual-chain migration opened (Bitcoin sweep PSBT)"
+                "dual-chain migration: Bitcoin sweep PSBT opened"
             );
+            first_proposal.get_or_insert(proposal_id);
+        }
+
+        if let Some(proposal_id) = first_proposal {
             return Ok(Redirect::to(&format!(
                 "/federations/{federation_id}/proposals/{proposal_id}"
             ))
             .into_response());
         }
-        // Nothing to move → enact the version bump now (both descriptors carried).
+        // Nothing to move on either chain → enact the version bump now (both
+        // descriptors carried forward).
         db::enact_version_transition(&state.db, pending_id, federation_id, migration_id).await?;
         tracing::info!(
             %migration_id, %pending_id, lineage = %federation.lineage_id,

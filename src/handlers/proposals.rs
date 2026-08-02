@@ -77,6 +77,7 @@ pub async fn create(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
+    axum::extract::Query(cq): axum::extract::Query<crate::handlers::federations::ChainQuery>,
     axum::Form(form): axum::Form<CreateProposalForm>,
 ) -> Result<Response, AppError> {
     let row = db::find_federation_by_id(&state.db, federation_id)
@@ -90,7 +91,10 @@ pub async fn create(
             "fee_rate_sat_vb must be at least 1".to_string(),
         ));
     }
-    let kind = FederationKind::from_row(&row);
+    // Dual-chain vaults are Bitcoin-networked; the active side is carried by the
+    // `?chain=elements` toggle, not the row's network. Resolve from both so an
+    // Elements-view send builds a PSET, not a PSBT.
+    let kind = crate::handlers::federations::resolve_active_chain(&row, cq.chain.as_deref());
 
     let label_ref = form.label.as_deref().filter(|s| !s.trim().is_empty());
     let proposal = match kind {
@@ -226,6 +230,10 @@ fn parse_lbtc_amount_sat(input: &str) -> Result<u64, AppError> {
 pub struct MaxSpendQuery {
     pub recipient_address: String,
     pub fee_rate_sat_vb: u64,
+    /// `"elements"` selects the Liquid side of a dual-chain vault (from the
+    /// same toggle the Send form posts on). Absent/other = Bitcoin.
+    #[serde(default)]
+    pub chain: Option<String>,
 }
 
 /// The exact net amount a Send-Max drain would deliver to the recipient
@@ -256,7 +264,9 @@ pub async fn max_spend(
     let row = db::find_federation_by_id(&state.db, federation_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
-    let max_sat = if FederationKind::from_row(&row).is_liquid() {
+    let max_sat = if crate::handlers::federations::resolve_active_chain(&row, q.chain.as_deref())
+        .is_liquid()
+    {
         let fw = state.elements_wallets.load_or_init(federation_id).await?;
         fw.sync().await?;
         let address = fw.parse_address(q.recipient_address.trim())?;
@@ -544,8 +554,14 @@ pub async fn sign_data(
     // and PSET proposals, and its `network` is always Bitcoin.
     let kind = proposal_kind(&proposal);
 
+    // Only a Trezor needs the Trezor-format request, which fetches each input's
+    // previous transaction via bitcoind RPC. A Jade signs the PSBT directly (its
+    // script consumes only psbt/descriptor/network), so building it for a Jade is
+    // both wasted work and an outright failure on electrum/esplora backends whose
+    // RPC node doesn't hold the input txs (e.g. a testnet4-via-electrum vault with
+    // a regtest RPC node → RPC error -5). PSET (Liquid) never uses it either.
     let trezor = match kind {
-        FederationKind::Bitcoin => {
+        FederationKind::Bitcoin if signer.device_type.eq_ignore_ascii_case("trezor") => {
             let fw = state.wallets.load_or_init(federation_id).await?;
             Some(
                 fw.trezor_sign_request(
@@ -557,10 +573,7 @@ pub async fn sign_data(
                 .await?,
             )
         }
-        // Trezor doesn't sign PSETs in this app, and there's no
-        // request shape we can hand to it for Liquid. The browser
-        // only loads the Jade-Liquid script for these federations.
-        FederationKind::Liquid => None,
+        FederationKind::Bitcoin | FederationKind::Liquid => None,
     };
 
     // A Liquid proposal must hand the Jade-Liquid signer the *Elements* network

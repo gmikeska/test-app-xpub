@@ -1,12 +1,6 @@
 {% extends "_federation_layout.html" %}
 
 {% block tab_body %}
-{% if federation.is_liquid && federation.elements_capable %}
-<section class="card">
-  <h2>New proposal</h2>
-  <p class="muted">You're viewing this federation on <strong>Elements</strong>. Sending on the Elements side via the chain toggle is coming in the next update — balances, receive addresses and address detail are live. To transact, <a href="/federations/{{ federation.id }}/send">switch to Bitcoin</a>.</p>
-</section>
-{% else %}
 <section class="card">
   <h2>New proposal</h2>
   {% if federation.is_liquid %}
@@ -14,7 +8,7 @@
   {% else %}
     <p class="muted">Build an unsigned PSBT with BDK's coin selection. After it's created, cosigners can sign with their Trezor or Jade.</p>
   {% endif %}
-  <form method="post" action="/federations/{{ federation.id }}/proposals" class="stack-form">
+  <form method="post" action="/federations/{{ federation.id }}/proposals{{ federation.chain_qs }}" class="stack-form">
     <label>
       <span>Recipient address</span>
       {% if let Some(addr) = locked_recipient %}
@@ -62,6 +56,7 @@
             var url = '/federations/{{ federation.id }}/max-spend'
                     + '?recipient_address=' + encodeURIComponent(address)
                     + '&fee_rate_sat_vb=' + encodeURIComponent(feeRate);
+            {% if federation.is_liquid %}url += '&chain=elements';{% endif %}
             var res = await fetch(url, { headers: { 'Accept': 'application/json' } });
             if (!res.ok) { alert('Could not compute max: ' + (await res.text())); return; }
             var data = await res.json();
@@ -92,7 +87,6 @@
     </div>
   </form>
 </section>
-{% endif %}
 
 <section class="card">
   <h2>Proposals</h2>

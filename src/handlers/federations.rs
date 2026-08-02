@@ -422,8 +422,12 @@ pub async fn send(
         version_ids.push(v.id);
     }
     let proposal_rows = db::list_proposals_for_federations(&state.db, &version_ids).await?;
+    // A dual-chain vault carries both Bitcoin (PSBT) and Elements (PSET)
+    // proposals against the same versions; the Proposals list should only show
+    // the chain currently in view (the `?chain` toggle), not both.
     let proposals: Vec<ProposalView> = proposal_rows
         .into_iter()
+        .filter(|r| r.chain == federation.active_chain)
         .map(|r| {
             let (version_label, viewer_can_sign) = version_meta
                 .get(&r.federation_id)
