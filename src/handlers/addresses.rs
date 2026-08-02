@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::AuthUser;
 use crate::db::{self, FederationKind};
+use crate::elements_wallet::REVEAL_COUNT as ELEMENTS_REVEAL_COUNT;
 use crate::error::AppError;
 use crate::wallet::{AddressReceipt, REVEAL_COUNT};
 
@@ -36,6 +37,10 @@ struct AddressDetailTemplate {
     address: AddressInfoView,
     /// Receipts (incoming UTXOs).
     receipts: Vec<ReceiptView>,
+    /// `true` for Liquid federations, where LWK v1 exposes no per-address
+    /// activity — the template hides the BTC-denominated receipt/balance rows
+    /// and the `bitcoin-cli` funding hint.
+    is_liquid: bool,
 }
 
 /// Lightweight federation header for the breadcrumb / "back" link.
@@ -106,12 +111,12 @@ pub async fn show(
         }
     }
 
-    // LWK doesn't expose per-address activity in v1; the Liquid Receive
-    // page intentionally omits the address-link column.
+    // Liquid: LWK v1 doesn't expose per-address activity (no `locate_address`
+    // / `address_history`), so a dedicated helper renders the address, its
+    // derivation index and a QR with the receipt/balance columns marked
+    // unavailable — parity with Bitcoin for everything LWK can provide.
     if FederationKind::from_row(&row) == FederationKind::Liquid {
-        return Err(AppError::BadRequest(
-            "address detail is not available for Liquid federations".to_string(),
-        ));
+        return render_liquid_address_detail(&state, user.email, row, &address_raw).await;
     }
 
     let fw = state.wallets.load_or_init(federation_id).await?;
@@ -170,6 +175,74 @@ pub async fn show(
             receipt_count: activity.receipts.len(),
         },
         receipts,
+        is_liquid: false,
+    }
+    .into_response())
+}
+
+/// Render the address-detail page for a Liquid federation.
+///
+/// LWK v1 offers no per-address activity, so this shows the address, its
+/// external-keychain derivation index and a QR, with receipts/balances marked
+/// unavailable. Addresses we don't own (or beyond the reveal window) 404,
+/// mirroring the Bitcoin path.
+async fn render_liquid_address_detail(
+    state: &AppState,
+    email: String,
+    row: crate::models::FederationRow,
+    address_raw: &str,
+) -> Result<Response, AppError> {
+    let fw = state.elements_wallets.load_or_init(row.id).await?;
+    let summary = fw.sync().await?;
+    let address = fw.parse_address(address_raw)?;
+    let addr_str = address.to_string();
+    // Match against the revealed external addresses to recover the index.
+    let revealed = fw.reveal_addresses(ELEMENTS_REVEAL_COUNT).await?;
+    let Some(index) = revealed
+        .iter()
+        .find(|r| r.address == addr_str)
+        .map(|r| r.index)
+    else {
+        return Err(AppError::NotFound(format!(
+            "address {address_raw} for federation {}",
+            row.id,
+        )));
+    };
+
+    // Bare confidential address as the QR payload; there is no universally
+    // honoured `liquidnetwork:` BIP-21 analogue, and every Liquid wallet
+    // accepts the raw address.
+    let qr_uri = addr_str.clone();
+    let qr_svg = QrCode::new(qr_uri.as_bytes())
+        .map_err(|e| AppError::BadRequest(format!("Failed to encode QR: {e}")))?
+        .render::<svg::Color<'_>>()
+        .min_dimensions(220, 220)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#0b0d12"))
+        .light_color(svg::Color("#f4f6fb"))
+        .build();
+
+    Ok(AddressDetailTemplate {
+        email,
+        federation: FederationHeader {
+            id: row.id,
+            label: row.label,
+            network: row.network,
+            tip_height: summary.tip_height,
+        },
+        address: AddressInfoView {
+            address: addr_str,
+            qr_uri,
+            qr_svg,
+            derivation_index: Some(index),
+            keychain: "external".to_string(),
+            // LWK v1 gives no per-address receipts/balance.
+            total_received_btc: "—".to_string(),
+            unspent_btc: "—".to_string(),
+            receipt_count: 0,
+        },
+        receipts: Vec::new(),
+        is_liquid: true,
     }
     .into_response())
 }

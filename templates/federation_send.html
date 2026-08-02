@@ -22,17 +22,12 @@
     {% if locked_recipient.is_none() %}
     <label>
       <span>Amount ({{ federation.asset_ticker }})</span>
-      {% if federation.is_liquid %}
-      <input type="text" name="amount_btc" required autocomplete="off"
-             placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$">
-      {% else %}
       <div class="amount-row" style="display:flex; gap:.5rem; align-items:center;">
         <input type="text" id="amount_btc" name="amount_btc" required autocomplete="off"
                placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$" style="flex:1;">
         <button type="button" id="send_max_btn" style="padding:9px 14px; border-radius:6px; border:1px solid var(--border); background:var(--panel-2); color:inherit; font:inherit; cursor:pointer; white-space:nowrap;">Max</button>
       </div>
       <small class="muted">Enter a recipient + fee rate, then <strong>Max</strong> to fill the full balance (fee deducted).</small>
-      {% endif %}
     </label>
     <input type="hidden" id="send_max" name="send_max" value="">
     <script>

@@ -162,17 +162,22 @@ pub async fn create(
             fw.sync().await?;
             let address = fw.parse_address(form.recipient_address.trim())?;
             // Liquid federations don't carry the versioned old-signer migration
-            // flow; a proposal always spends an explicit amount.
-            let amount_str = form
-                .amount_btc
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
-            let satoshi = parse_lbtc_amount_sat(amount_str)?;
-            let built = fw
-                .build_proposal(&address, satoshi, Some(form.fee_rate_sat_vb))
-                .await?;
+            // flow, but do support Send-Max (drain) as well as an explicit amount.
+            let send_max = matches!(form.send_max.as_deref(), Some("true"));
+            let built = if send_max {
+                fw.build_drain_proposal(&address, Some(form.fee_rate_sat_vb))
+                    .await?
+            } else {
+                let amount_str = form
+                    .amount_btc
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
+                let satoshi = parse_lbtc_amount_sat(amount_str)?;
+                fw.build_proposal(&address, satoshi, Some(form.fee_rate_sat_vb))
+                    .await?
+            };
             db::insert_proposal(
                 &state.db,
                 federation_id,
@@ -246,13 +251,25 @@ pub async fn max_spend(
             "fee_rate_sat_vb must be at least 1".to_string(),
         ));
     }
-    let fw = state.wallets.load_or_init(federation_id).await?;
-    fw.sync().await?;
-    let address = fw.parse_address(q.recipient_address.trim())?;
-    let amount = fw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?;
+    let row = db::find_federation_by_id(&state.db, federation_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
+    let max_sat = if FederationKind::from_row(&row).is_liquid() {
+        let fw = state.elements_wallets.load_or_init(federation_id).await?;
+        fw.sync().await?;
+        let address = fw.parse_address(q.recipient_address.trim())?;
+        fw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?
+    } else {
+        let fw = state.wallets.load_or_init(federation_id).await?;
+        fw.sync().await?;
+        let address = fw.parse_address(q.recipient_address.trim())?;
+        fw.compute_drain_amount(&address, q.fee_rate_sat_vb)
+            .await?
+            .to_sat()
+    };
     Ok(Json(MaxSpendResponse {
-        max_sat: amount.to_sat(),
-        max_btc: format!("{:.8}", amount.to_btc()),
+        max_sat,
+        max_btc: format!("{:.8}", bitcoin::Amount::from_sat(max_sat).to_btc()),
     }))
 }
 

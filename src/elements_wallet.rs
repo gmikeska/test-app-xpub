@@ -652,6 +652,97 @@ impl LiquidFederationWallet {
         })
     }
 
+    /// Preview a full-balance drain to `recipient`: the net L-BTC (sats) a
+    /// send-max would deliver (balance − mining fee), without signing or
+    /// broadcasting. Drives the Send page's **Max** button. Uses the same LWK
+    /// `drain_lbtc` builder as [`Self::build_migration_pset`] so the previewed
+    /// amount matches the sweep that follows.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::BuildPset`] if LWK cannot build the drain (e.g. no
+    /// spendable balance, or the fee would exceed the value).
+    pub async fn compute_drain_amount(
+        &self,
+        recipient: &Address,
+        fee_rate_sat_vb: u64,
+    ) -> Result<u64, ElementsWalletError> {
+        let balance = self.lbtc_balance_sat().await?;
+        let fee_sat = {
+            let wollet = self.inner.lock().await;
+            let lwk_fee_rate = {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let v = (fee_rate_sat_vb as f64 * 1000.0) as f32;
+                Some(v)
+            };
+            let pset = TxBuilder::new(self.network.to_lwk())
+                .drain_lbtc_wallet()
+                .drain_lbtc_to(recipient.clone())
+                .fee_rate(lwk_fee_rate)
+                .finish(&wollet)
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            drop(wollet);
+            // The fee output is the explicit, script-less output; the rest is
+            // swept to the recipient, so drained = balance − fee.
+            pset.outputs()
+                .iter()
+                .find(|o| o.script_pubkey.is_empty())
+                .and_then(|o| o.amount)
+                .unwrap_or(0)
+        };
+        Ok(balance.saturating_sub(fee_sat))
+    }
+
+    /// Build a **Send-Max** proposal: drain the whole L-BTC balance to
+    /// `recipient` (fee out of the swept amount). Same drain as
+    /// [`Self::build_migration_pset`] but labelled as a regular send, so the
+    /// Send page's Max button produces a normal (non-migration) proposal.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::BuildPset`] if LWK cannot build the drain.
+    pub async fn build_drain_proposal(
+        &self,
+        recipient: &Address,
+        fee_rate_sat_vb: Option<u64>,
+    ) -> Result<BuiltLiquidProposal, ElementsWalletError> {
+        let pset_b64 = {
+            let wollet = self.inner.lock().await;
+            let lwk_fee_rate = fee_rate_sat_vb.map(|sat_vb| {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let v = (sat_vb as f64 * 1000.0) as f32;
+                v
+            });
+            let pset = TxBuilder::new(self.network.to_lwk())
+                .drain_lbtc_wallet()
+                .drain_lbtc_to(recipient.clone())
+                .fee_rate(lwk_fee_rate)
+                .finish(&wollet)
+                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            drop(wollet);
+            pset.to_string()
+        };
+
+        let proposal_json = serde_json::json!({
+            "recipient": recipient.to_string(),
+            "recipient_amount_sat": "max",
+            "send_max": true,
+            "asset": "L-BTC",
+            "fee_rate_sat_vb": fee_rate_sat_vb,
+        });
+        let coin_selection_json = serde_json::json!({
+            "selected": [],
+            "outputs": [],
+            "fee_sat": serde_json::Value::Null,
+            "total_input_sat": serde_json::Value::Null,
+            "note": "LWK-driven send-max drain; details deliberately elided in v1.",
+        });
+
+        Ok(BuiltLiquidProposal {
+            pset_b64,
+            proposal_json,
+            coin_selection_json,
+        })
+    }
+
     /// Merge a cosigner's partial PSET into the canonical base PSET.
     /// Returns the merged PSET (still as base64) and a flag indicating
     /// whether [`Wollet::finalize`] succeeds against the merged result.

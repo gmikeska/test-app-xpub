@@ -195,6 +195,20 @@ only the Bitcoin sync calls it (`wallet.rs:1131`); no Elements caller anywhere.
      headless-testable (needs a Jade + the xpub device-onboarding flow). Every seam
      is a direct mirror of proven code (regular Liquid send) or chain-agnostic. ← *commit*
 4. **xpub: max-spend + Send-Max for Liquid**; **address-detail for Liquid**. ← *commit*
+   - **DONE.** `LiquidFederationWallet` gained `compute_drain_amount` (balance −
+     LWK-planned drain fee) and `build_drain_proposal` (send-max PSET, tagged
+     `send_max:true`). `proposals.rs` `max_spend` handler branches on
+     `FederationKind` (Liquid → sync + `compute_drain_amount`); the Liquid send
+     arm honours `send_max` → `build_drain_proposal` vs fixed-amount
+     `build_proposal`. `federation_send.html` unified the amount input + **Max**
+     button (drives `/max-spend`) for both chains.
+   - **address-detail:** `addresses.rs` no longer hard-rejects Liquid — a
+     `render_liquid_address_detail` helper shows the address, external-keychain
+     derivation index (matched via `reveal_addresses`) and a QR; the template
+     hides the BTC-denominated receipt/balance rows + `bitcoin-cli` hint behind
+     an `is_liquid` flag, since LWK v1 exposes no per-address activity.
+   - **Caveat:** build+fmt+pedantic-clippy green; browser-signed send not
+     headless-testable (Jade). ← *commit*
 5. **xpub: wire the RPC Elements backend** (`ElementsChainBackend::Rpc`), so xpub
    has the full 4-backend matrix. ← *commit*
 6. **Crate: reorg reconcile surface + Elements migration-reconciliation** (net-new)
