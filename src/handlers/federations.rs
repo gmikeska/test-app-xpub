@@ -266,18 +266,21 @@ pub async fn receive(
         let (tip_height, addresses, change_addresses) = if is_liquid {
             let vw = state.elements_wallets.load_or_init(v.id).await?;
             let sync = vw.sync().await?;
+            // Real per-address totals in one pass (LWK stamps each wallet output
+            // with its keychain + index), keyed by (is_external, index).
+            let activity = vw.address_activity_map().await?;
             let addresses = vw
                 .reveal_addresses(ELEMENTS_REVEAL_COUNT)
                 .await?
                 .into_iter()
-                .map(|a| AddressView {
-                    index: a.index,
-                    address: a.address,
-                    // LWK doesn't track per-address received/unspent in v1; we
-                    // surface zero so the table renders without a sentinel
-                    // string that templates might trip on.
-                    received_btc: format_btc_sats(0),
-                    unspent_btc: format_btc_sats(0),
+                .map(|a| {
+                    let (recv, unspent) = activity.get(&(true, a.index)).copied().unwrap_or((0, 0));
+                    AddressView {
+                        index: a.index,
+                        address: a.address,
+                        received_btc: format_btc_sats(recv),
+                        unspent_btc: format_btc_sats(unspent),
+                    }
                 })
                 .collect();
             if v.id == federation_id {
@@ -286,7 +289,8 @@ pub async fn receive(
                 let lbtc_sat = vw.lbtc_balance_sat().await?;
                 header_balance = Some(BalanceView::from_lbtc_sat(lbtc_sat, reserved));
             }
-            // LWK v1 doesn't expose per-address change history; leave empty.
+            // LWK's Wollet doesn't expose change addresses as a simple lookup;
+            // Liquid change-address rows stay out of scope (as before).
             (sync.tip_height, addresses, Vec::new())
         } else {
             let vw = state.wallets.load_or_init(v.id).await?;

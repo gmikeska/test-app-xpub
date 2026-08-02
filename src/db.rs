@@ -930,7 +930,8 @@ mod versioning {
     const FEDERATION_COLS: &str = "id, label, threshold, total_signers, network, descriptor, \
      migration_sweep_confirmed_height, \
      snapshot_json, bdk_changeset, chain_tip_height, lineage_id, version_index, \
-     predecessor_id, status, migration_status, migration_sweep_txid, created_at";
+     predecessor_id, status, migration_status, migration_sweep_txid, \
+     master_blinding_key, next_external_index, next_internal_index, created_at";
 
     /// All versions of a lineage, oldest first (`version_index` ascending).
     ///
@@ -1105,6 +1106,7 @@ mod versioning {
                     f.snapshot_json, f.bdk_changeset, f.chain_tip_height, f.lineage_id, \
                     f.version_index, f.predecessor_id, f.status, f.migration_status, \
                     f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
+                    f.master_blinding_key, f.next_external_index, f.next_internal_index, \
                     f.created_at \
              FROM federations f \
              JOIN federation_members m ON m.federation_id = f.id \

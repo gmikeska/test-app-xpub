@@ -12,7 +12,7 @@
 <section class="card">
   <h2>Receive addresses</h2>
   {% if federation.is_liquid %}
-  <p class="muted">Confidential external-keychain addresses (BIP-48 multisig + SLIP-77). Per-address balances are not tracked by LWK in this app.{% if federation_groups.len() > 1 %} Use the tabs to view addresses for each version you're a member of.{% endif %}</p>
+  <p class="muted">Confidential external-keychain addresses (BIP-48 multisig + SLIP-77). Click any address to view its unconfidential form and receipts.{% if federation_groups.len() > 1 %} Use the tabs to view addresses for each version you're a member of.{% endif %}</p>
   {% else %}
   <p class="muted">External-keychain addresses (BIP-48 multisig). Click any address to view receipts.{% if federation_groups.len() > 1 %} Use the tabs to view addresses for each version you're a member of.{% endif %}</p>
   {% endif %}
@@ -51,13 +51,9 @@
             <tr>
               <td>{{ a.index }}</td>
               <td>
-                {% if federation.is_liquid %}
+                <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
                   <code class="break">{{ a.address }}</code>
-                {% else %}
-                  <a href="/federations/{{ g.federation_id }}/addresses/{{ a.address }}">
-                    <code>{{ a.address }}</code>
-                  </a>
-                {% endif %}
+                </a>
               </td>
               <td>{{ a.received_btc }}</td>
               <td>{{ a.unspent_btc }}</td>

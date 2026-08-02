@@ -8,7 +8,7 @@
 //   `[<master_fingerprint>/<path>]<xpub>`
 // to POST to `/onboard/signer` with `device_type: "Jade"`.
 
-import { JadeRpc, pathToU32Array, base58CheckDecode, bytesToHex } from "./vendor/jade-rpc.js";
+import { JadeRpc, pathToU32Array, base58CheckDecode, bytesToHex } from "./vendor/jade-rpc.js?v=j8d1";
 
 const cfg = window.EMVAULT;
 

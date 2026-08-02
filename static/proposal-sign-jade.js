@@ -25,7 +25,7 @@ import {
     hexToBytes,
     base64ToBytes,
     bytesToBase64,
-} from "./vendor/jade-rpc.js";
+} from "./vendor/jade-rpc.js?v=j8d1";
 
 const cfg = window.EMVAULT || {};
 

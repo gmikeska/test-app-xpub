@@ -38,13 +38,13 @@
           <dt>Derivation index</dt><dd>—</dd>
       {% endmatch %}
       <dt>Keychain</dt><dd>{{ address.keychain }}</dd>
-      {% if is_liquid %}
-        <dt>Activity</dt><dd class="muted">Per-address balances aren't tracked for Liquid (LWK)</dd>
-        <dt>Address</dt><dd><code class="break">{{ address.qr_uri }}</code></dd>
-      {% else %}
-        <dt>Total received</dt><dd>{{ address.total_received_btc }} BTC</dd>
-        <dt>Unspent</dt><dd>{{ address.unspent_btc }} BTC</dd>
-        <dt>Receipts</dt><dd>{{ address.receipt_count }}</dd>
+      {% if let Some(unconf) = address.unconfidential %}
+        <dt>Unconfidential</dt><dd><code class="break">{{ unconf }}</code></dd>
+      {% endif %}
+      <dt>Total received</dt><dd>{{ address.total_received_btc }} {% if is_liquid %}L-BTC{% else %}BTC{% endif %}</dd>
+      <dt>Unspent</dt><dd>{{ address.unspent_btc }} {% if is_liquid %}L-BTC{% else %}BTC{% endif %}</dd>
+      <dt>Receipts</dt><dd>{{ address.receipt_count }}</dd>
+      {% if !is_liquid %}
         <dt>BIP-21 URI</dt><dd><code class="break">{{ address.qr_uri }}</code></dd>
       {% endif %}
       <dt>Chain tip</dt><dd>{{ federation.tip_height }}</dd>
@@ -54,17 +54,19 @@
 
 <section class="card">
   <h2>Receipts</h2>
-  {% if is_liquid %}
-    <p class="muted">Liquid (LWK) doesn't expose per-address receipts. Confidential amounts are visible at the wallet level — see the federation's balance and transactions tabs.</p>
-  {% else if receipts.is_empty() %}
-    <p class="muted">No transactions have paid this address yet. Send to <code>{{ address.address }}</code> from your regtest node (e.g. <code>bitcoin-cli sendtoaddress {{ address.address }} 0.001</code>), mine a block, and reload.</p>
+  {% if receipts.is_empty() %}
+    {% if is_liquid %}
+      <p class="muted">No transactions have paid this address yet. Send tL-BTC to <code>{{ address.address }}</code> and reload.</p>
+    {% else %}
+      <p class="muted">No transactions have paid this address yet. Send to <code>{{ address.address }}</code> from your regtest node (e.g. <code>bitcoin-cli sendtoaddress {{ address.address }} 0.001</code>), mine a block, and reload.</p>
+    {% endif %}
   {% else %}
     <table class="data">
       <thead>
         <tr>
           <th>Txid</th>
           <th>Vout</th>
-          <th>Amount (BTC)</th>
+          <th>Amount ({% if is_liquid %}L-BTC{% else %}BTC{% endif %})</th>
           <th>Status</th>
           <th>Height</th>
           <th>State</th>

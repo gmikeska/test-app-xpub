@@ -13,6 +13,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use emvault::core::bdk_wallet::KeychainKind;
 use emvault::core::bitcoin::{self, Txid};
+use emvault::elements::lwk_wollet::Chain;
 use qrcode::QrCode;
 use qrcode::render::svg;
 use serde::Serialize;
@@ -55,8 +56,12 @@ struct FederationHeader {
 /// View-model for the selected address.
 #[derive(Debug, Serialize)]
 struct AddressInfoView {
-    /// The bech32 address as a string.
+    /// The bech32 address as a string. For Liquid this is the *confidential*
+    /// address.
     address: String,
+    /// Liquid only: the underlying *unconfidential* address (the `tex1…` /
+    /// `ex1…` form electrs indexes by). `None` for Bitcoin.
+    unconfidential: Option<String>,
     /// BIP-21 URI string (`bitcoin:<addr>`), used as the QR payload.
     qr_uri: String,
     /// Pre-rendered SVG markup, ready to drop inline.
@@ -111,10 +116,10 @@ pub async fn show(
         }
     }
 
-    // Liquid: LWK v1 doesn't expose per-address activity (no `locate_address`
-    // / `address_history`), so a dedicated helper renders the address, its
-    // derivation index and a QR with the receipt/balance columns marked
-    // unavailable — parity with Bitcoin for everything LWK can provide.
+    // Liquid federations render through a dedicated helper: confidential +
+    // unconfidential address, derivation index, QR, and real per-address
+    // received/unspent + receipts reconstructed from LWK's index-stamped
+    // wallet outputs — full parity with the Bitcoin path.
     if FederationKind::from_row(&row) == FederationKind::Liquid {
         return render_liquid_address_detail(&state, user.email, row, &address_raw).await;
     }
@@ -166,6 +171,7 @@ pub async fn show(
         },
         address: AddressInfoView {
             address: address.to_string(),
+            unconfidential: None,
             qr_uri,
             qr_svg,
             derivation_index: index,
@@ -183,9 +189,10 @@ pub async fn show(
 /// Render the address-detail page for a Liquid federation.
 ///
 /// LWK v1 offers no per-address activity, so this shows the address, its
-/// external-keychain derivation index and a QR, with receipts/balances marked
-/// unavailable. Addresses we don't own (or beyond the reveal window) 404,
-/// mirroring the Bitcoin path.
+/// external-keychain derivation index, the unconfidential address, a QR, and
+/// real per-address received/unspent + receipts (grouped from LWK's
+/// index-stamped wallet outputs). Addresses we don't own (or beyond the reveal
+/// window) 404, mirroring the Bitcoin path.
 async fn render_liquid_address_detail(
     state: &AppState,
     email: String,
@@ -209,6 +216,22 @@ async fn render_liquid_address_detail(
         )));
     };
 
+    // Real per-address activity: LWK stamps every wallet output with its
+    // derivation index, so we can attribute the confidential amounts.
+    let activity = fw.address_activity(Chain::External, index).await?;
+    let tip = summary.tip_height;
+    let mut receipts: Vec<ReceiptView> = activity
+        .receipts
+        .iter()
+        .map(|r| liquid_receipt_view(r, tip))
+        .collect();
+    // Newest first, mirroring the Bitcoin table's ordering.
+    receipts.sort_by(|a, b| b.height.cmp(&a.height));
+
+    // The unconfidential address is the scriptPubKey-bearing form electrs
+    // indexes by (drop the blinding key).
+    let unconfidential = address.to_unconfidential().to_string();
+
     // Bare confidential address as the QR payload; there is no universally
     // honoured `liquidnetwork:` BIP-21 analogue, and every Liquid wallet
     // accepts the raw address.
@@ -228,23 +251,50 @@ async fn render_liquid_address_detail(
             id: row.id,
             label: row.label,
             network: row.network,
-            tip_height: summary.tip_height,
+            tip_height: tip,
         },
         address: AddressInfoView {
             address: addr_str,
+            unconfidential: Some(unconfidential),
             qr_uri,
             qr_svg,
             derivation_index: Some(index),
             keychain: "external".to_string(),
-            // LWK v1 gives no per-address receipts/balance.
-            total_received_btc: "—".to_string(),
-            unspent_btc: "—".to_string(),
-            receipt_count: 0,
+            total_received_btc: format_sat(activity.received_sat),
+            unspent_btc: format_sat(activity.unspent_sat),
+            receipt_count: activity.receipts.len(),
         },
-        receipts: Vec::new(),
+        receipts,
         is_liquid: true,
     }
     .into_response())
+}
+
+/// Format an L-BTC amount in sats as a fixed 8-decimal string (exact integer
+/// math, no float rounding).
+fn format_sat(sats: u64) -> String {
+    format!("{}.{:08}", sats / 100_000_000, sats % 100_000_000)
+}
+
+/// Build a receipt row from a Liquid per-address output, computing a friendly
+/// confirmation status against the current chain tip.
+fn liquid_receipt_view(r: &crate::elements_wallet::LiquidReceipt, tip: u32) -> ReceiptView {
+    let (status, height) = r.height.map_or_else(
+        || ("Mempool".to_string(), "—".to_string()),
+        |h| {
+            let confs = tip.saturating_sub(h).saturating_add(1);
+            let plural = if confs == 1 { "conf" } else { "confs" };
+            (format!("{confs} {plural} (h={h})"), h.to_string())
+        },
+    );
+    ReceiptView {
+        txid: r.txid.to_string(),
+        vout: r.vout,
+        amount_btc: format_sat(r.amount_sat),
+        status,
+        height,
+        is_spent: r.is_spent,
+    }
 }
 
 fn keychain_label(k: KeychainKind) -> String {

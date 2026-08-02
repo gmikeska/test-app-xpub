@@ -35,7 +35,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -44,10 +44,10 @@ use emvault::elements::elements::pset::PartiallySignedTransaction as Pset;
 use emvault::elements::lwk_wollet::asyncr::{EsploraClient, EsploraClientBuilder};
 use emvault::elements::lwk_wollet::blocking::BlockchainBackend;
 use emvault::elements::lwk_wollet::elements::{
-    Address, AddressParams, Transaction, encode::serialize_hex,
+    Address, AddressParams, OutPoint, Transaction, Txid, encode::serialize_hex,
 };
 use emvault::elements::lwk_wollet::{
-    ElectrumClient, ElectrumUrl, TxBuilder, Update, Wollet, WolletBuilder, WolletDescriptor,
+    Chain, ElectrumClient, ElectrumUrl, TxBuilder, Update, Wollet, WolletBuilder, WolletDescriptor,
 };
 use sqlx::PgPool;
 use tokio::sync::Mutex as AsyncMutex;
@@ -517,6 +517,101 @@ impl LiquidFederationWallet {
         Ok(bal.get(&policy).copied().unwrap_or(0))
     }
 
+    /// Per-address L-BTC activity for a revealed address, reconstructed from
+    /// the synced wallet's tx history + current UTXO set.
+    ///
+    /// LWK stamps every wallet-owned output with its `wildcard_index` and
+    /// `ext_int` chain, so — unlike the wallet-level balance — we *can*
+    /// attribute confidential amounts to a specific address: walk every
+    /// wallet output across all transactions, keep the ones on `(chain, index)`
+    /// carrying the policy (L-BTC) asset, and mark each spent/unspent by
+    /// membership in the live UTXO set. This is the Elements analog of the
+    /// Bitcoin address-history path.
+    ///
+    /// # Errors
+    /// Propagates LWK `utxos` / `transactions` errors.
+    pub async fn address_activity(
+        &self,
+        chain: Chain,
+        index: u32,
+    ) -> Result<LiquidAddressActivity, ElementsWalletError> {
+        let wollet = self.inner.lock().await;
+        let policy = wollet.policy_asset();
+        let unspent: HashSet<OutPoint> = wollet
+            .utxos()
+            .map_err(|e| ElementsWalletError::Utxos(e.to_string()))?
+            .iter()
+            .map(|u| u.outpoint)
+            .collect();
+        let txs = wollet
+            .transactions()
+            .map_err(|e| ElementsWalletError::Transactions(e.to_string()))?;
+
+        let mut activity = LiquidAddressActivity::default();
+        for tx in &txs {
+            for out in tx.outputs.iter().flatten() {
+                if out.ext_int != chain
+                    || out.wildcard_index != index
+                    || out.unblinded.asset != policy
+                {
+                    continue;
+                }
+                let is_spent = !unspent.contains(&out.outpoint);
+                activity.received_sat = activity.received_sat.saturating_add(out.unblinded.value);
+                if !is_spent {
+                    activity.unspent_sat = activity.unspent_sat.saturating_add(out.unblinded.value);
+                }
+                activity.receipts.push(LiquidReceipt {
+                    txid: out.outpoint.txid,
+                    vout: out.outpoint.vout,
+                    amount_sat: out.unblinded.value,
+                    height: out.height,
+                    is_spent,
+                });
+            }
+        }
+        Ok(activity)
+    }
+
+    /// Per-address L-BTC totals for the whole wallet in a single tx-history
+    /// pass, keyed by `(is_external, index)` → `(received_sat, unspent_sat)`.
+    /// Cheaper than calling [`address_activity`](Self::address_activity) once
+    /// per address when rendering the full receive table.
+    ///
+    /// # Errors
+    /// Propagates LWK `utxos` / `transactions` errors.
+    pub async fn address_activity_map(
+        &self,
+    ) -> Result<HashMap<(bool, u32), (u64, u64)>, ElementsWalletError> {
+        let wollet = self.inner.lock().await;
+        let policy = wollet.policy_asset();
+        let unspent: HashSet<OutPoint> = wollet
+            .utxos()
+            .map_err(|e| ElementsWalletError::Utxos(e.to_string()))?
+            .iter()
+            .map(|u| u.outpoint)
+            .collect();
+        let txs = wollet
+            .transactions()
+            .map_err(|e| ElementsWalletError::Transactions(e.to_string()))?;
+
+        let mut map: HashMap<(bool, u32), (u64, u64)> = HashMap::new();
+        for tx in &txs {
+            for out in tx.outputs.iter().flatten() {
+                if out.unblinded.asset != policy {
+                    continue;
+                }
+                let key = (matches!(out.ext_int, Chain::External), out.wildcard_index);
+                let entry = map.entry(key).or_default();
+                entry.0 = entry.0.saturating_add(out.unblinded.value);
+                if unspent.contains(&out.outpoint) {
+                    entry.1 = entry.1.saturating_add(out.unblinded.value);
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// Current chain tip height the wallet is aware of.
     pub async fn tip_height(&self) -> u32 {
         self.inner.lock().await.tip().height()
@@ -893,6 +988,34 @@ pub struct RevealedLiquidAddress {
     pub index: u32,
     /// Confidential address rendered in the user's network format.
     pub address: String,
+}
+
+/// Per-address L-BTC activity, the Elements analog of the Bitcoin
+/// address-history view. Produced by
+/// [`LiquidFederationWallet::address_activity`].
+#[derive(Debug, Clone, Default)]
+pub struct LiquidAddressActivity {
+    /// Total L-BTC (sats) ever received at this address, across all history.
+    pub received_sat: u64,
+    /// L-BTC (sats) still unspent at this address.
+    pub unspent_sat: u64,
+    /// One entry per wallet-owned output paid to this address.
+    pub receipts: Vec<LiquidReceipt>,
+}
+
+/// A single output paid to a watched Liquid address.
+#[derive(Debug, Clone)]
+pub struct LiquidReceipt {
+    /// Funding transaction id.
+    pub txid: Txid,
+    /// Output index within the funding transaction.
+    pub vout: u32,
+    /// Unblinded L-BTC amount (sats).
+    pub amount_sat: u64,
+    /// Confirmation height, or `None` if still in the mempool.
+    pub height: Option<u32>,
+    /// `true` once the output has been spent.
+    pub is_spent: bool,
 }
 
 /// Output of [`LiquidFederationWallet::build_proposal`].
