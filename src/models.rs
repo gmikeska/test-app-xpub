@@ -211,6 +211,18 @@ pub struct ProposalRow {
     pub created_at: DateTime<Utc>,
     /// Timestamp of the most recent mutation (signature merge / cancel / etc.).
     pub updated_at: DateTime<Utc>,
+    /// Chain this proposal lives on: `"bitcoin"` (PSBT) or `"elements"` (PSET).
+    /// Drives the sign/finalize/broadcast PSBT-vs-PSET logic for dual-chain
+    /// federations, whose `network` is always Bitcoin.
+    pub chain: String,
+}
+
+impl ProposalRow {
+    /// `true` iff this is an Elements (PSET) proposal.
+    #[must_use]
+    pub fn is_liquid(&self) -> bool {
+        matches!(self.chain.as_str(), "elements" | "liquid")
+    }
 }
 
 /// `transaction_signatures` row.

@@ -197,6 +197,21 @@ function jadeLiquidMultisigName(federationId) {
     return `astL${hex}`;
 }
 
+/// Map the server's Elements network string to an `lwk_wasm` `Network`.
+function lwkNetworkFor(raw, lwk) {
+    switch ((raw || "").toLowerCase()) {
+        case "liquid":
+        case "liquidv1":
+            return lwk.Network.mainnet();
+        case "elementsregtest":
+        case "localtest-liquid":
+            return lwk.Network.regtestDefault();
+        // "liquidtestnet" / "liquid-testnet" / anything else → Liquid testnet.
+        default:
+            return lwk.Network.testnet();
+    }
+}
+
 /// Build the Jade `register_multisig` `descriptor` object for our
 /// `elwsh(sortedmulti(...))` Liquid federations.
 function buildJadeLiquidDescriptor(parsed) {
@@ -250,21 +265,26 @@ async function signProposal() {
         btn.disabled = false;
         return;
     }
-    const network = jadeLiquidNetworkName(rawNetwork);
-
-    let parsed;
+    // Jade has no native `sign_pset` RPC — a PSET is signed by decomposing it
+    // into `sign_liquid_tx` params (input value/asset commitments, trusted
+    // change, etc.). That decomposition lives in `lwk_wasm`, so we drive the
+    // Jade through it: register the confidential multisig, then `sign(pset)`.
+    setStatus("Loading Jade signer…");
+    let lwk;
     try {
-        parsed = parseCtDescriptor(descriptor);
+        lwk = await import("/static/lwk/lwk_wasm.js");
+        await lwk.default();
     } catch (e) {
-        setStatus(`Descriptor parse failed: ${e.message || e}`, "error");
+        setStatus(`Could not load the Jade signer (lwk_wasm): ${e.message || e}`, "error");
         btn.disabled = false;
         return;
     }
+    const lwkNet = lwkNetworkFor(rawNetwork, lwk);
 
     setStatus("Requesting Jade serial port…");
     let jade;
     try {
-        jade = await JadeRpc.fromSerial();
+        jade = await lwk.Jade.fromSerial(lwkNet, false);
     } catch (e) {
         setStatus(`Could not open Jade: ${e.message || e}`, "error");
         btn.disabled = false;
@@ -272,23 +292,14 @@ async function signProposal() {
     }
 
     try {
-        setStatus("Unlocking Jade — confirm the PIN on the device…");
-        await jade.unlock(network);
-
-        setStatus("Registering Liquid multisig wallet on Jade — confirm on the device…");
+        setStatus("Registering Liquid multisig on Jade — confirm on the device…");
         const name = jadeLiquidMultisigName(federationId);
-        await jade.registerLiquidMultisig(network, name, buildJadeLiquidDescriptor(parsed));
+        const wolletDescriptor = new lwk.WolletDescriptor(descriptor);
+        await jade.registerDescriptor(name, wolletDescriptor);
 
-        setStatus("Signing PSET — confirm outputs on the Jade screen…");
-        const psetBytes = base64ToBytes(psetB64);
-        const signedBytes = await jade.signPset(network, psetBytes);
-        const signedB64 = bytesToBase64(signedBytes);
-
-        console.debug(
-            "[jade-liquid] signed PSET bytes=%d sha256=%s",
-            signedBytes.length,
-            await sha256ShortHex(signedBytes),
-        );
+        setStatus("Signing PSET — confirm the outputs on the Jade screen…");
+        const signedPset = await jade.sign(new lwk.Pset(psetB64));
+        const signedB64 = signedPset.toString();
 
         setStatus("Submitting signed PSET…");
         const submitResp = await fetch(
@@ -318,13 +329,10 @@ async function signProposal() {
         console.error(e);
         setStatus(`Signing failed: ${e.message || e}`, "error");
         btn.disabled = false;
-    } finally {
-        try {
-            await jade.close();
-        } catch (e) {
-            console.warn("[jade-liquid] close after sign:", e);
-        }
     }
+    // Note: lwk_wasm's Jade holds the Web Serial port for its lifetime (no
+    // `close`); the page reload after a successful submit releases it. On error
+    // the user can retry after reloading.
 }
 
 async function sha256ShortHex(bytes) {

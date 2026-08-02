@@ -719,8 +719,15 @@ impl LiquidFederationWallet {
         destination: &Address,
         fee_rate_sat_vb: Option<u64>,
     ) -> Result<BuiltLiquidProposal, ElementsWalletError> {
-        let pset_b64 = {
+        let (pset_b64, drained_sat, fee_sat, input_count) = {
             let wollet = self.inner.lock().await;
+            let policy = wollet.policy_asset();
+            let balance = wollet
+                .balance()
+                .map_err(|e| ElementsWalletError::Balance(e.to_string()))?
+                .get(&policy)
+                .copied()
+                .unwrap_or(0);
             let lwk_fee_rate = fee_rate_sat_vb.map(|sat_vb| {
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 let v = (sat_vb as f64 * 1000.0) as f32;
@@ -732,22 +739,49 @@ impl LiquidFederationWallet {
                 .fee_rate(lwk_fee_rate)
                 .finish(&wollet)
                 .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            let input_count = pset.inputs().len();
+            // The fee output is the explicit, script-less output; everything else
+            // is swept to the destination, so drained = balance − fee.
+            let fee_sat = pset
+                .outputs()
+                .iter()
+                .find(|o| o.script_pubkey.is_empty())
+                .and_then(|o| o.amount)
+                .unwrap_or(0);
             drop(wollet);
-            pset.to_string()
+            (
+                pset.to_string(),
+                balance.saturating_sub(fee_sat),
+                fee_sat,
+                input_count,
+            )
         };
+
+        // A drain that selected no inputs means the wallet holds no spendable
+        // L-BTC — surface it rather than persist a confusing zero-value sweep.
+        if input_count == 0 {
+            return Err(ElementsWalletError::BuildPset(
+                "migration sweep selected no inputs — the wallet has no spendable L-BTC \
+                 (has the deposit confirmed and synced?)"
+                    .to_string(),
+            ));
+        }
 
         let proposal_json = serde_json::json!({
             "recipient": destination.to_string(),
+            "recipient_amount_sat": drained_sat,
             "kind": "migration",
             "asset": "L-BTC",
             "fee_rate_sat_vb": fee_rate_sat_vb,
+            "fee_sat": fee_sat,
+            "input_count": input_count,
         });
         let coin_selection_json = serde_json::json!({
             "selected": [],
-            "outputs": [],
-            "fee_sat": serde_json::Value::Null,
-            "total_input_sat": serde_json::Value::Null,
-            "note": "LWK-driven drain sweep; details deliberately elided in v1.",
+            "outputs": [{ "address": destination.to_string(), "amount_sat": drained_sat }],
+            "fee_sat": fee_sat,
+            "total_input_sat": drained_sat + fee_sat,
+            "note": "LWK-driven drain sweep.",
         });
 
         Ok(BuiltLiquidProposal {

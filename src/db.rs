@@ -630,7 +630,7 @@ pub async fn update_federation_tip_only(
 
 const PROPOSAL_COLUMNS: &str = "id, federation_id, proposed_by, label, status, \
     psbt_b64, proposal_json, coin_selection_json, finalized_tx_hex, txid, \
-    broadcast_at, created_at, updated_at";
+    broadcast_at, created_at, updated_at, chain";
 
 /// Create a new proposal row.
 ///
@@ -645,15 +645,16 @@ pub async fn insert_proposal(
     psbt_b64: &str,
     proposal_json: &JsonValue,
     coin_selection_json: &JsonValue,
+    chain: &str,
 ) -> sqlx::Result<ProposalRow> {
     sqlx::query_as::<_, ProposalRow>(
         "INSERT INTO transaction_proposals \
             (federation_id, proposed_by, label, psbt_b64, proposal_json, \
-             coin_selection_json) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
+             coin_selection_json, chain) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
          RETURNING id, federation_id, proposed_by, label, status, psbt_b64, \
                    proposal_json, coin_selection_json, finalized_tx_hex, \
-                   txid, broadcast_at, created_at, updated_at",
+                   txid, broadcast_at, created_at, updated_at, chain",
     )
     .bind(federation_id)
     .bind(proposed_by)
@@ -661,6 +662,7 @@ pub async fn insert_proposal(
     .bind(psbt_b64)
     .bind(proposal_json)
     .bind(coin_selection_json)
+    .bind(chain)
     .fetch_one(pool)
     .await
 }
@@ -1427,8 +1429,13 @@ mod versioning {
         pub label: &'a str,
         /// Bitcoin network string.
         pub network: &'a str,
-        /// Canonical multipath descriptor for the next version.
+        /// Canonical multipath descriptor for the next version (Bitcoin `wsh`).
         pub descriptor: &'a str,
+        /// Elements confidential descriptor `ct(slip77(mbk), elwsh(...))` for the
+        /// next version, when the lineage is Elements-capable (dual-chain). Carried
+        /// forward so a migration never drops the Liquid side. `None` for
+        /// Bitcoin-only lineages.
+        pub elements_descriptor: Option<&'a str>,
         /// Canonical snapshot JSON for the next version.
         pub snapshot_json: &'a serde_json::Value,
         /// `version_index` for the pending version (base + 1).
@@ -1473,15 +1480,16 @@ mod versioning {
         let total_signers = i32::try_from(spec.next_members.len()).unwrap_or(i32::MAX);
         let pending_id: Uuid = sqlx::query_scalar(
             "INSERT INTO federations \
-                (label, threshold, total_signers, network, descriptor, snapshot_json, \
-                 lineage_id, version_index, status, predecessor_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9) RETURNING id",
+                (label, threshold, total_signers, network, descriptor, elements_descriptor, \
+                 snapshot_json, lineage_id, version_index, status, predecessor_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10) RETURNING id",
         )
         .bind(spec.label)
         .bind(spec.next_threshold)
         .bind(total_signers)
         .bind(spec.network)
         .bind(spec.descriptor)
+        .bind(spec.elements_descriptor)
         .bind(spec.snapshot_json)
         .bind(spec.lineage_id)
         .bind(spec.version_index)
@@ -1543,12 +1551,13 @@ mod versioning {
         psbt_b64: &str,
         proposal_json: &serde_json::Value,
         coin_selection_json: &serde_json::Value,
+        chain: &str,
     ) -> sqlx::Result<Uuid> {
         sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO transaction_proposals \
                 (federation_id, proposed_by, label, kind, migration_id, \
-                 psbt_b64, proposal_json, coin_selection_json) \
-             VALUES ($1, $2, 'Federation migration', 'migration', $3, $4, $5, $6) \
+                 psbt_b64, proposal_json, coin_selection_json, chain) \
+             VALUES ($1, $2, 'Federation migration', 'migration', $3, $4, $5, $6, $7) \
              RETURNING id",
         )
         .bind(federation_id)
@@ -1557,6 +1566,7 @@ mod versioning {
         .bind(psbt_b64)
         .bind(proposal_json)
         .bind(coin_selection_json)
+        .bind(chain)
         .fetch_one(pool)
         .await
     }

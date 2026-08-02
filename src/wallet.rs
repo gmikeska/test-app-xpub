@@ -426,7 +426,15 @@ impl WalletManager {
         // means the wallet has tracked nothing, so this is always safe; this also
         // heals federations created before this fix. Inserting onto the existing
         // genesis checkpoint keeps the chain connected (no `CannotConnect`).
-        if loaded.fresh || wallet.latest_checkpoint().height() == 0 {
+        //
+        // ONLY for the RPC emitter backend: the nodeless Esplora/Electrum
+        // backends `full_scan` by scripthash (no block-walk), so they don't need
+        // a birthday — and seeding one from `self.rpc` would stamp a checkpoint
+        // from a *different* chain than the electrum/esplora server (e.g. a
+        // regtest RPC while syncing testnet4 electrum), which surfaces as
+        // "cannot find agreement block with server". Skip it for them.
+        let rpc_emitter_backend = self.esplora.is_none() && self.electrum.is_none();
+        if rpc_emitter_backend && (loaded.fresh || wallet.latest_checkpoint().height() == 0) {
             let count = self.rpc.get_block_count().map_err(WalletError::Rpc)?;
             if count > 0 {
                 let hash = self.rpc.get_block_hash(count).map_err(WalletError::Rpc)?;

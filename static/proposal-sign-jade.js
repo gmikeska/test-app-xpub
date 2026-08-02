@@ -56,6 +56,7 @@ function jadeNetworkName(network) {
             return "mainnet";
         case "testnet":
         case "testnet3":
+        case "testnet4":
         case "signet":
             return "testnet";
         case "regtest":

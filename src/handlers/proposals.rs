@@ -154,6 +154,7 @@ pub async fn create(
                 &built.psbt_b64,
                 &built.proposal_json,
                 &built.coin_selection_json,
+                "bitcoin",
             )
             .await?
         }
@@ -186,6 +187,7 @@ pub async fn create(
                 &built.pset_b64,
                 &built.proposal_json,
                 &built.coin_selection_json,
+                "elements",
             )
             .await?
         }
@@ -398,12 +400,17 @@ pub async fn detail(
         "/home".to_string()
     };
 
-    // Proposal detail renders on the federation's base (Bitcoin) chain header
-    // for now; per-proposal chain tagging (Elements PSET proposals) lands with
-    // the Elements-transacting batch.
-    let (federation, _cosigners) =
-        crate::handlers::federations::build_header_views(&state, row, user.id, None).await?;
+    // The proposal's own chain drives the header (so a dual-chain vault's page
+    // loads the right — Bitcoin vs Liquid — sign script and labels).
     let proposal = load_proposal_for_federation(&state, federation_id, proposal_id).await?;
+    let proposal_chain = if proposal.is_liquid() {
+        Some("elements")
+    } else {
+        None
+    };
+    let (federation, _cosigners) =
+        crate::handlers::federations::build_header_views(&state, row, user.id, proposal_chain)
+            .await?;
     let proposer = db::find_user_by_id(&state.db, proposal.proposed_by)
         .await?
         .map_or_else(|| "—".to_string(), |u| u.email);
@@ -533,7 +540,9 @@ pub async fn sign_data(
         )));
     }
     let threshold = usize::try_from(row.threshold).unwrap_or(0);
-    let kind = FederationKind::from_row(&row);
+    // Chain is the proposal's own — a dual-chain federation carries both PSBT
+    // and PSET proposals, and its `network` is always Bitcoin.
+    let kind = proposal_kind(&proposal);
 
     let trezor = match kind {
         FederationKind::Bitcoin => {
@@ -554,10 +563,30 @@ pub async fn sign_data(
         FederationKind::Liquid => None,
     };
 
+    // A Liquid proposal must hand the Jade-Liquid signer the *Elements* network
+    // and the confidential (`ct(...)`) descriptor — not the federation's Bitcoin
+    // network / `wsh(...)` descriptor. Dual-chain vaults are Bitcoin-networked
+    // and keep the ct descriptor in `elements_descriptor`; legacy Liquid feds
+    // keep it in `descriptor` with a Liquid `network`.
+    let (network, descriptor) = match kind {
+        FederationKind::Bitcoin => (row.network.clone(), row.descriptor.clone()),
+        FederationKind::Liquid => {
+            let net = state
+                .config
+                .elements_network
+                .map_or_else(|| row.network.clone(), |n| n.to_string());
+            let ct = row
+                .elements_descriptor
+                .clone()
+                .unwrap_or_else(|| row.descriptor.clone());
+            (net, ct)
+        }
+    };
+
     Ok(Json(SignDataResponse {
         psbt_b64: proposal.psbt_b64.clone(),
-        descriptor: row.descriptor.clone(),
-        network: row.network.clone(),
+        descriptor,
+        network,
         federation_kind: match kind {
             FederationKind::Bitcoin => "bitcoin".to_string(),
             FederationKind::Liquid => "liquid".to_string(),
@@ -715,7 +744,8 @@ pub async fn submit_partial_psbt(
     Path((federation_id, proposal_id)): Path<(Uuid, Uuid)>,
     Json(body): Json<SubmitPartialPsbt>,
 ) -> Result<Response, AppError> {
-    let row = db::find_federation_by_id(&state.db, federation_id)
+    // Existence guard (the proposal's own `chain` drives PSBT-vs-PSET below).
+    db::find_federation_by_id(&state.db, federation_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
@@ -728,7 +758,7 @@ pub async fn submit_partial_psbt(
         .await?
         .ok_or_else(|| AppError::BadRequest("you have no signer onboarded".to_string()))?;
 
-    let kind = FederationKind::from_row(&row);
+    let kind = proposal_kind(&proposal);
     let partial_b64 = body.partial_psbt_b64.trim().to_string();
 
     let (merged_b64, fully_signed) = match kind {
@@ -891,7 +921,8 @@ pub async fn broadcast(
     AuthUser(user): AuthUser,
     Path((federation_id, proposal_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let row = db::find_federation_by_id(&state.db, federation_id)
+    // Existence guard (the proposal's own `chain` drives the broadcast path).
+    db::find_federation_by_id(&state.db, federation_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("federation {federation_id}")))?;
     if !db::user_is_federation_member(&state.db, federation_id, user.id).await? {
@@ -905,7 +936,7 @@ pub async fn broadcast(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("no finalized tx on this proposal".to_string()))?;
 
-    let kind = FederationKind::from_row(&row);
+    let kind = proposal_kind(&proposal);
     let txid = match kind {
         FederationKind::Bitcoin => {
             let fw = state.wallets.load_or_init(federation_id).await?;
@@ -1046,6 +1077,18 @@ async fn load_proposal_for_federation(
         )));
     }
     Ok(p)
+}
+
+/// The chain a proposal lives on, as a [`FederationKind`]. Dual-chain
+/// federations carry both PSBT (Bitcoin) and PSET (Elements) proposals, so the
+/// PSBT-vs-PSET path keys off the proposal's own `chain`, not the federation
+/// network (which is always Bitcoin for a dual-chain vault).
+fn proposal_kind(p: &ProposalRow) -> FederationKind {
+    if p.is_liquid() {
+        FederationKind::Liquid
+    } else {
+        FederationKind::Bitcoin
+    }
 }
 
 fn require_status_in(p: &ProposalRow, allowed: &[&str]) -> Result<(), AppError> {

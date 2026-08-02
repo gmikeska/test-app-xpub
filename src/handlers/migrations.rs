@@ -109,7 +109,7 @@ pub async fn migrate_post(
     let threshold = validate_threshold(threshold_m, plan.next_members.len())
         .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
 
-    // Resolve the next version's signers and build its descriptor/snapshot.
+    // Resolve the next version's signers.
     let resolved = resolve_member_signers(
         &state.db,
         &plan.next_members,
@@ -136,60 +136,56 @@ pub async fn migrate_post(
         signers.push(s);
     }
 
-    // A federation may hold funds on only one chain (e.g. Liquid funded,
-    // Bitcoin empty). Migrating the *empty* chain has nothing to sweep, so it
-    // becomes a pure version bump: mint the successor and enact the version flip
-    // immediately — no sweep transaction, no proposal to sign.
-    let has_funds = if is_liquid {
-        let w = state.elements_wallets.load_or_init(federation_id).await?;
-        w.sync().await?;
-        w.lbtc_balance_sat().await? > 0
-    } else {
-        let w = state.wallets.load_or_init(federation_id).await?;
-        w.sync().await?;
-        w.balance().await.total().to_sat() > 0
-    };
-    if !has_funds {
-        let (descriptor_string, snapshot_json) = if is_liquid {
-            let elements_net = state.config.elements_network.ok_or_else(|| {
-                AppError::BadFederationInput("ELEMENTS_NETWORK not configured.".into())
-            })?;
-            let mut mbk = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut mbk);
-            let mut builder = CtDescriptorBuilder::new(threshold.get(), &mbk)
-                .map_err(|e| AppError::BadFederationInput(e.to_string()))?
-                .key_mode(CtKeyMode::Ranged);
-            for s in &signers {
-                builder
-                    .add_signer(s)
-                    .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
-            }
-            let ct_desc = builder
-                .build()
-                .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
-            let descriptor_string = ct_to_multipath_string(&ct_desc);
-            let net_type: NetworkType = elements_net.into();
-            let federation_obj =
-                Federation::new(threshold.get(), signers, net_type).map_err(|e| {
-                    AppError::BadFederationInput(format!("Cannot construct federation: {e}"))
-                })?;
-            let snapshot_json: serde_json::Value = serde_json::from_str(
-                &FederationSnapshot::from_federation(&federation_obj).to_canonical_json(),
-            )
-            .map_err(|e| {
-                AppError::BadFederationInput(format!("Failed to serialise snapshot: {e}"))
-            })?;
-            (descriptor_string, snapshot_json)
-        } else {
-            let built = build_federation(
-                signers,
-                threshold.get(),
-                NetworkType::Bitcoin(state.config.network),
-            )
-            .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
-            (built.descriptor_string, built.snapshot_json)
-        };
+    // === Dual-chain migration ===
+    // A dual-chain (Elements-capable) vault migrates so its successor carries
+    // BOTH descriptors (never dropping a chain), and the funded chain's coins
+    // sweep forward. We support a single funded chain per migration (the common
+    // case); a vault funded on both at once is rejected with a clear message.
+    if federation.elements_descriptor.is_some() {
+        let elements_net = state.config.elements_network.ok_or_else(|| {
+            AppError::BadFederationInput("ELEMENTS_NETWORK not configured.".into())
+        })?;
 
+        // Successor Elements `ct(...)` descriptor (fresh SLIP-77 key) — borrows
+        // `signers`; then the Bitcoin `wsh(...)` successor consumes them.
+        let mut mbk = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut mbk);
+        let mut ct_builder = CtDescriptorBuilder::new(threshold.get(), &mbk)
+            .map_err(|e| AppError::BadFederationInput(e.to_string()))?
+            .key_mode(CtKeyMode::Ranged);
+        for s in &signers {
+            ct_builder
+                .add_signer(s)
+                .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        }
+        let ct_desc = ct_builder
+            .build()
+            .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        let elements_descriptor = ct_to_multipath_string(&ct_desc);
+        let btc_built = build_federation(
+            signers,
+            threshold.get(),
+            NetworkType::Bitcoin(state.config.network),
+        )
+        .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+
+        // Which chain(s) hold funds?
+        let btc_wallet = state.wallets.load_or_init(federation_id).await?;
+        btc_wallet.sync().await?;
+        let btc_sat = btc_wallet.balance().await.total().to_sat();
+        let ele_wallet = state.elements_wallets.load_or_init(federation_id).await?;
+        ele_wallet.sync().await?;
+        let lbtc_sat = ele_wallet.lbtc_balance_sat().await?;
+        if btc_sat > 0 && lbtc_sat > 0 {
+            return Err(AppError::BadRequest(
+                "This vault holds funds on both Bitcoin and Elements. Migrating a vault funded \
+                 on both chains at once isn't supported yet — move the funds onto one chain \
+                 first, then migrate."
+                    .to_owned(),
+            ));
+        }
+
+        // Persist the pending successor carrying BOTH descriptors.
         let next_members: Vec<(Uuid, Uuid)> =
             resolved.iter().map(|(uid, row)| (*uid, row.id)).collect();
         let changes: Vec<(Uuid, Option<Uuid>, &str)> = plan
@@ -211,29 +207,101 @@ pub async fn migrate_post(
             description: None,
             label: &federation.label,
             network: &federation.network,
-            descriptor: &descriptor_string,
-            snapshot_json: &snapshot_json,
+            descriptor: &btc_built.descriptor_string,
+            elements_descriptor: Some(&elements_descriptor),
+            snapshot_json: &btc_built.snapshot_json,
             version_index: federation.version_index + 1,
             next_members: &next_members,
             changes: &changes,
         };
         let (migration_id, pending_id) = db::create_pending_migration(&state.db, &spec).await?;
-        // Nothing to move → enact the version flip now (base is left with its
-        // default `not_applicable` migration status; no sweep to reconcile).
+
+        // Sweep the funded chain (if any) to the successor. Broadcasting the
+        // sweep enacts the version flip (chain-agnostic, in the broadcast
+        // handler). An unfunded vault version-bumps immediately.
+        if lbtc_sat > 0 {
+            let destination = ElementsWollet::from_descriptor_str(
+                &elements_descriptor,
+                mbk,
+                elements_net,
+                elements_net.to_lwk(),
+            )
+            .and_then(|w| w.address(KeychainKind::External, 0))
+            .map_err(|e| {
+                AppError::BadFederationInput(format!("Cannot derive successor address: {e}"))
+            })?;
+            let built = ele_wallet
+                .build_migration_pset(&destination, Some(body.fee_rate))
+                .await?;
+            let proposal_id = db::insert_migration_proposal(
+                &state.db,
+                federation_id,
+                user.id,
+                migration_id,
+                &built.pset_b64,
+                &built.proposal_json,
+                &built.coin_selection_json,
+                "elements",
+            )
+            .await?;
+            tracing::info!(
+                %migration_id, %pending_id, %proposal_id, chain = "elements",
+                "dual-chain migration opened (Elements sweep PSET)"
+            );
+            return Ok(Redirect::to(&format!(
+                "/federations/{federation_id}/proposals/{proposal_id}"
+            ))
+            .into_response());
+        }
+        if btc_sat > 0 {
+            let destination = crate::wallet::first_external_address(
+                state.config.network,
+                &btc_built.descriptor_string,
+            )?;
+            let built_tx = btc_wallet
+                .build_migration_tx(&destination, body.fee_rate)
+                .await?;
+            let proposal_id = db::insert_migration_proposal(
+                &state.db,
+                federation_id,
+                user.id,
+                migration_id,
+                &built_tx.psbt_b64,
+                &built_tx.proposal_json,
+                &built_tx.coin_selection_json,
+                "bitcoin",
+            )
+            .await?;
+            tracing::info!(
+                %migration_id, %pending_id, %proposal_id, chain = "bitcoin",
+                "dual-chain migration opened (Bitcoin sweep PSBT)"
+            );
+            return Ok(Redirect::to(&format!(
+                "/federations/{federation_id}/proposals/{proposal_id}"
+            ))
+            .into_response());
+        }
+        // Nothing to move → enact the version bump now (both descriptors carried).
         db::enact_version_transition(&state.db, pending_id, federation_id, migration_id).await?;
         tracing::info!(
-            %migration_id, %pending_id, lineage = %federation.lineage_id, proposer = %user.email,
-            "federation migration enacted with no sweep (unfunded version bump)"
+            %migration_id, %pending_id, lineage = %federation.lineage_id,
+            "dual-chain migration enacted with no sweep (unfunded version bump)"
         );
         return Ok(Redirect::to(&format!("/federations/{pending_id}/federation")).into_response());
     }
 
-    // Funded path: build the successor descriptor/snapshot + the migration sweep
-    // BEFORE persisting anything, so a build failure leaves no dangling pending
-    // version. The successor's destination is derived from its own descriptor —
-    // its wallet recognises the inflow once it syncs (§5.2). Both chains produce
-    // the same shape:
+    // Build the successor descriptor/snapshot + the migration sweep BEFORE
+    // persisting anything, so an unfunded federation (nothing to sweep) fails
+    // cleanly without leaving a dangling pending version. The successor's
+    // destination is derived from its own descriptor — its wallet recognises the
+    // inflow once it syncs (§5.2). Both chains produce the same shape:
     // (descriptor, snapshot, sweep_b64, proposal_json, coin_selection_json).
+    //
+    // NOTE: migration is not yet dual-chain-aware — the successor carries a
+    // single-chain descriptor, so migrating an Elements-capable federation would
+    // drop its `elements_descriptor`. Dual-chain migration (carry both
+    // descriptors + sweep each funded chain) is a dedicated follow-up; until
+    // then the migrate form stays gated to Bitcoin-only federations.
     let (
         descriptor_string,
         snapshot_json,
@@ -348,6 +416,10 @@ pub async fn migrate_post(
         label: &federation.label,
         network: &federation.network,
         descriptor: &descriptor_string,
+        // Bitcoin-only path today (dual-chain migration is gated above until the
+        // per-chain sweep lands, at which point the successor's Elements
+        // descriptor is carried here).
+        elements_descriptor: None,
         snapshot_json: &snapshot_json,
         version_index: federation.version_index + 1,
         next_members: &next_members,
@@ -366,6 +438,7 @@ pub async fn migrate_post(
         &sweep_b64,
         &sweep_proposal_json,
         &sweep_coin_selection_json,
+        if is_liquid { "elements" } else { "bitcoin" },
     )
     .await?;
 
