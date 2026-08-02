@@ -2,7 +2,7 @@
 
 ## Verification
 
-- [ ] **Full end-to-end pass on both `esplora` and raw `RPC` chain backends.** Re-run the
+- [ ] **Full end-to-end pass on both `esplora`, `waterfalls` and raw `RPC` chain backends.** Re-run the
       complete dual-chain flow against each backend and confirm parity with the electrum
       run already proven (2026-08-02). For **each** backend (esplora, RPC), on both
       Bitcoin and Elements:
