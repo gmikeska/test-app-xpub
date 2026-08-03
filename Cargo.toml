@@ -20,7 +20,7 @@ publish = false
 # Those crates' types cross the EmVault API, so we consume them through the
 # ecosystem's canonical re-exports (`emvault::core::*`, `emvault::elements::*`)
 # — single source of truth, no version drift between the app and the library.
-emvault = { version = "0.6", features = [
+emvault = { version = "0.7", features = [
     "xpub",
     "esplora",
     "electrum",
@@ -97,7 +97,7 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 # `wsh(sortedmulti)` federation from mnemonics with no physical device. Cargo
 # unions this with the normal `emvault` dep, so the test build gets xpub +
 # test-utils.
-emvault = { version = "0.6", features = ["test-utils"] }
+emvault = { version = "0.7", features = ["test-utils"] }
 
 [features]
 # DB-layer tests (`#[sqlx::test]`) that need a reachable Postgres. Off by
