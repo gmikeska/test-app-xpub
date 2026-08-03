@@ -1827,7 +1827,9 @@ mod tests {
             total_signers: 1,
             network: "testnet",
             descriptor: "wsh(sortedmulti(1,...))",
+            elements_descriptor: None,
             snapshot_json: &snap,
+            master_blinding_key: None,
         };
         insert_federation_with_members(pool, &spec, &[(owner, signer)]).await
     }
@@ -2059,6 +2061,7 @@ mod tests {
             label: "Treasury",
             network: "testnet",
             descriptor: "wsh(sortedmulti(2,...))",
+            elements_descriptor: None,
             snapshot_json: &snap,
             version_index: 1,
             next_members: &next_members,
@@ -2128,6 +2131,7 @@ mod tests {
             label: "Treasury",
             network: "testnet",
             descriptor: "wsh(sortedmulti(1,...))",
+            elements_descriptor: None,
             snapshot_json: &snap,
             version_index: 1,
             next_members: &next_members,
@@ -2142,6 +2146,7 @@ mod tests {
             "psbt-b64",
             &json!({}),
             &json!({}),
+            "bitcoin",
         )
         .await?;
         Ok((lineage, migration, pending, proposal))
@@ -2337,12 +2342,30 @@ mod tests {
         mk_member(&pool, v1, carol, Some(carol_signer)).await?;
 
         let snap = json!({});
-        let p_v0 = insert_proposal(&pool, lineage, alice, Some("on v0"), "psbt0", &snap, &snap)
-            .await?
-            .id;
-        let p_v1 = insert_proposal(&pool, v1, alice, Some("on v1"), "psbt1", &snap, &snap)
-            .await?
-            .id;
+        let p_v0 = insert_proposal(
+            &pool,
+            lineage,
+            alice,
+            Some("on v0"),
+            "psbt0",
+            &snap,
+            &snap,
+            "bitcoin",
+        )
+        .await?
+        .id;
+        let p_v1 = insert_proposal(
+            &pool,
+            v1,
+            alice,
+            Some("on v1"),
+            "psbt1",
+            &snap,
+            &snap,
+            "bitcoin",
+        )
+        .await?
+        .id;
 
         // A current signer (alice) sees both versions' proposals, newest first.
         let alice_visible = visible_versions_for_user(&pool, lineage, alice)
@@ -2396,6 +2419,7 @@ mod tests {
             label: "Treasury",
             network: "testnet",
             descriptor: "wsh(sortedmulti(2,...))",
+            elements_descriptor: None,
             snapshot_json: &snap,
             version_index: 1,
             next_members: &next_members,

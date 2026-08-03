@@ -623,8 +623,43 @@ impl LiquidFederationWallet {
     }
 
     /// Current chain tip height the wallet is aware of.
-    pub async fn tip_height(&self) -> u32 {
-        self.inner.lock().await.tip().height()
+    /// Fetch the current chain-tip height **directly from the configured
+    /// backend** (esplora/waterfalls or electrum) without a full wallet scan —
+    /// a cheap live read for header/confirmation display. Falls back to the
+    /// cached wollet tip when no endpoint is configured for the backend.
+    ///
+    /// # Errors
+    /// [`ElementsWalletError::Sync`] if the backend can't be reached.
+    pub async fn tip_height(&self) -> Result<u32, ElementsWalletError> {
+        match self.backend {
+            ElementsChainBackend::Esplora | ElementsChainBackend::Waterfalls => {
+                let Some(esplora_url) = self.esplora_url.clone() else {
+                    return Ok(self.inner.lock().await.tip().height());
+                };
+                let mut client = EsploraClientBuilder::new(&esplora_url, self.network.to_lwk())
+                    .waterfalls(matches!(self.backend, ElementsChainBackend::Waterfalls))
+                    .build()
+                    .map_err(|e| ElementsWalletError::Sync(e.to_string()))?;
+                let header = client
+                    .tip()
+                    .await
+                    .map_err(|e| ElementsWalletError::Sync(e.to_string()))?;
+                Ok(header.height)
+            }
+            ElementsChainBackend::Electrum => {
+                let Some(electrum_url) = self.electrum_url.clone() else {
+                    return Ok(self.inner.lock().await.tip().height());
+                };
+                tokio::task::spawn_blocking(move || -> Result<u32, String> {
+                    let url = ElectrumUrl::from_str(&electrum_url).map_err(|e| e.to_string())?;
+                    let mut client = ElectrumClient::new(&url).map_err(|e| e.to_string())?;
+                    Ok(client.tip().map_err(|e| e.to_string())?.height)
+                })
+                .await
+                .map_err(|e| ElementsWalletError::Sync(format!("electrum tip task failed: {e}")))?
+                .map_err(ElementsWalletError::Sync)
+            }
+        }
     }
 
     /// Resolve a free-form Liquid address string. Only confidential

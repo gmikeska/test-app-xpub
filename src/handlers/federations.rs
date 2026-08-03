@@ -523,6 +523,26 @@ pub(crate) async fn build_header_views(
     let is_liquid = active_chain.is_liquid();
     let asset_ticker = if is_liquid { "L-BTC" } else { "BTC" }.to_string();
     let elements_capable = row.elements_descriptor.is_some();
+    // Fresh chain tip via a direct backend read (cheap — no full wallet scan),
+    // so the header/Send tab shows a live tip instead of the last-synced value.
+    // Falls back to the persisted tip on any backend error so the page still
+    // renders. Both chains now expose a direct backend tip read.
+    let stored_tip = row.chain_tip_height.and_then(|h| u32::try_from(h).ok());
+    let live_tip = if is_liquid {
+        if elements_capable {
+            match state.elements_wallets.load_or_init(row.id).await {
+                Ok(vw) => vw.tip_height().await.ok(),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        match state.wallets.load_or_init(row.id).await {
+            Ok(vw) => vw.tip_height().await.ok(),
+            Err(_) => None,
+        }
+    };
     let federation = FederationView {
         id: row.id,
         lineage_id: row.lineage_id,
@@ -532,11 +552,7 @@ pub(crate) async fn build_header_views(
         network: row.network,
         descriptor: row.descriptor,
         created_at: row.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-        // Caller overrides with the post-sync tip.
-        tip_height: row
-            .chain_tip_height
-            .and_then(|h| u32::try_from(h).ok())
-            .unwrap_or(0),
+        tip_height: live_tip.or(stored_tip).unwrap_or(0),
         is_liquid,
         asset_ticker,
         elements_capable,

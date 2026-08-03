@@ -199,6 +199,7 @@ async fn provision_federation(pool: &sqlx::PgPool) -> Uuid {
         total_signers: 3,
         network: "regtest",
         descriptor: &built.descriptor_string,
+        elements_descriptor: None,
         snapshot_json: &built.snapshot_json,
         master_blinding_key: None,
     };

@@ -1248,9 +1248,22 @@ impl FederationWallet {
         })
     }
 
-    /// Return the wallet's current local-chain tip height.
-    pub async fn tip_height(&self) -> u32 {
-        self.inner.lock().await.latest_checkpoint().height()
+    /// Fetch the current chain-tip height **directly from the configured
+    /// backend** (electrum/esplora server, or bitcoind RPC) without a full
+    /// wallet scan — a cheap live read for header/confirmation display.
+    ///
+    /// # Errors
+    /// [`WalletError`] if the configured backend can't be reached.
+    pub async fn tip_height(&self) -> Result<u32, WalletError> {
+        if let Some(backend) = self.electrum.as_deref() {
+            return Ok(backend.tip_height().await?);
+        }
+        if let Some(backend) = self.esplora.as_deref() {
+            return Ok(backend.tip_height().await?);
+        }
+        // RPC backend: read the node's block count directly.
+        let count = self.rpc.get_block_count().map_err(WalletError::Rpc)?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     /// Snapshot the wallet's current balance (confirmed + pending +
@@ -1916,9 +1929,10 @@ impl FederationWallet {
             }
         }
 
-        // Fetch each previous transaction (refTxs) via the synchronous
-        // bitcoincore_rpc client. Wrap in spawn_blocking so the executor
-        // stays responsive on slow regtest nodes / mempool RPC stalls.
+        // Fetch each input's previous transaction (refTxs) from the configured
+        // chain backend so the Trezor sign-data path stays nodeless on
+        // electrum/esplora/waterfalls; fall back to bitcoind RPC only in RPC
+        // mode (its blocking client runs on a blocking thread).
         let mut unique_txids: Vec<bitcoin::Txid> = Vec::new();
         let mut seen: std::collections::HashSet<bitcoin::Txid> = std::collections::HashSet::new();
         for txid in ref_txids {
@@ -1926,18 +1940,31 @@ impl FederationWallet {
                 unique_txids.push(txid);
             }
         }
-        let rpc = self.rpc.clone();
-        let raw_txs: Vec<Transaction> = tokio::task::spawn_blocking(move || {
-            let mut out: Vec<Transaction> = Vec::with_capacity(unique_txids.len());
+        let raw_txs: Vec<Transaction> = if let Some(backend) = self.electrum.as_deref() {
+            let mut out = Vec::with_capacity(unique_txids.len());
             for txid in unique_txids {
-                let raw = rpc.get_raw_transaction(&txid, None)?;
-                out.push(raw);
+                out.push(backend.get_tx(txid).await?);
             }
-            Ok::<_, bitcoincore_rpc::Error>(out)
-        })
-        .await
-        .expect("get_raw_transaction join")
-        .map_err(WalletError::Rpc)?;
+            out
+        } else if let Some(backend) = self.esplora.as_deref() {
+            let mut out = Vec::with_capacity(unique_txids.len());
+            for txid in unique_txids {
+                out.push(backend.get_tx(txid).await?);
+            }
+            out
+        } else {
+            let rpc = self.rpc.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut out: Vec<Transaction> = Vec::with_capacity(unique_txids.len());
+                for txid in unique_txids {
+                    out.push(rpc.get_raw_transaction(&txid, None)?);
+                }
+                Ok::<_, bitcoincore_rpc::Error>(out)
+            })
+            .await
+            .expect("get_raw_transaction join")
+            .map_err(WalletError::Rpc)?
+        };
         let ref_txs: Vec<TrezorRefTx> = raw_txs.iter().map(trezor_ref_tx_from).collect();
 
         // Compute the slot map: for each input, which index in the sorted
