@@ -83,6 +83,7 @@ pub async fn migrate_post(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
     Path(federation_id): Path<Uuid>,
+    axum::extract::Query(cq): axum::extract::Query<crate::handlers::federations::ChainQuery>,
     Form(body): Form<MigrationForm>,
 ) -> Result<Response, AppError> {
     let federation = load_active_current(&state, federation_id).await?;
@@ -210,12 +211,18 @@ pub async fn migrate_post(
 
         // Open a sweep proposal for EACH funded chain against this one migration.
         // Both target the same successor version; the user signs each on its own
-        // chain view. Broadcasting the first sweep enacts the version flip
+        // chain view. Broadcasting either sweep enacts the version flip
         // (chain-agnostic, idempotent in the broadcast handler — the second sweep
         // just moves its funds, since `migration_enactment_for_proposal` stops
         // firing once the migration is `enacted`). An unfunded vault version-bumps
-        // immediately. We redirect to the first sweep built (Elements when both).
-        let mut first_proposal: Option<Uuid> = None;
+        // immediately. We redirect to the sweep for the chain the migration was
+        // *requested from* (the `?chain=` view), falling back to the other funded
+        // chain when the requested one holds nothing.
+        let wants_elements =
+            crate::handlers::federations::resolve_active_chain(&federation, cq.chain.as_deref())
+                .is_liquid();
+        let mut ele_proposal: Option<Uuid> = None;
+        let mut btc_proposal: Option<Uuid> = None;
 
         if lbtc_sat > 0 {
             let destination = ElementsWollet::from_descriptor_str(
@@ -246,7 +253,7 @@ pub async fn migrate_post(
                 %migration_id, %pending_id, %proposal_id, chain = "elements",
                 "dual-chain migration: Elements sweep PSET opened"
             );
-            first_proposal.get_or_insert(proposal_id);
+            ele_proposal = Some(proposal_id);
         }
         if btc_sat > 0 {
             let destination = crate::wallet::first_external_address(
@@ -271,9 +278,16 @@ pub async fn migrate_post(
                 %migration_id, %pending_id, %proposal_id, chain = "bitcoin",
                 "dual-chain migration: Bitcoin sweep PSBT opened"
             );
-            first_proposal.get_or_insert(proposal_id);
+            btc_proposal = Some(proposal_id);
         }
 
+        // Prefer the proposal for the chain the migration was requested from; fall
+        // back to the other funded chain when the requested one holds no coins.
+        let first_proposal = if wants_elements {
+            ele_proposal.or(btc_proposal)
+        } else {
+            btc_proposal.or(ele_proposal)
+        };
         if let Some(proposal_id) = first_proposal {
             return Ok(Redirect::to(&format!(
                 "/federations/{federation_id}/proposals/{proposal_id}"

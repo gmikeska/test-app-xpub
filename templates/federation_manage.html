@@ -46,7 +46,7 @@
     a single migration. This mints a <strong>pending</strong> successor version — no funds move until
     the migration transaction is signed and broadcast.
   </p>
-  <form method="post" action="/federations/{{ m.active_id }}/migrations" class="stack-form">
+  <form method="post" action="/federations/{{ m.active_id }}/migrations{{ federation.chain_qs }}" class="stack-form">
     <label>
       <span>New threshold (m, signatures required)</span>
       <input type="number" name="threshold" required min="1" step="1" value="{{ m.threshold }}">
