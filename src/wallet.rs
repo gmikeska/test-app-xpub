@@ -2463,19 +2463,21 @@ struct MultisigPubkeyEntry {
 }
 
 const fn coin_name(network: Network) -> &'static str {
-    // `bitcoin::Network` is `#[non_exhaustive]`; any future variant (e.g.
-    // a Testnet4-like value) falls through to regtest/dev territory rather
-    // than mainnet, which is the safer default for this dev app.
-    #[allow(clippy::match_wildcard_for_single_variants, clippy::match_same_arms)]
+    // Map the app's Bitcoin network to the Trezor Connect `coin` string, so the
+    // coin switches gracefully with `BITCOIN_NETWORK` (testnet / testnet4 /
+    // signet / regtest). `bitcoin::Network` gained `#[non_exhaustive]` framing
+    // upstream but is exhaustive at this version, so we match every variant.
     match network {
         Network::Bitcoin => "btc",
-        // Trezor Connect has no `"signet"` coin ("coin not found"). Signet
-        // shares testnet's coin params + xpub/address versions, and the
-        // BIP-143 sighash Trezor signs is network-magic-independent, so we sign
-        // it as testnet — the same `"test"` coin onboarding uses.
-        Network::Testnet | Network::Signet => "test",
+        // Trezor Connect has no `"signet"` or `"testnet4"` coin. testnet4 and
+        // signet share testnet's `tb` address HRP + xpub/address versions
+        // (rust-bitcoin groups `Testnet | Testnet4 | Signet` as "testnets"), and
+        // the BIP-143 sighash Trezor signs is network-magic-independent — so we
+        // sign all three as testnet, the same `"test"` coin onboarding uses.
+        // Missing the `Testnet4` arm previously fell through to `"regtest"`, and
+        // Trezor rejected `tb1…` outputs as "Invalid Regtest output address".
+        Network::Testnet | Network::Testnet4 | Network::Signet => "test",
         Network::Regtest => "regtest",
-        _ => "regtest",
     }
 }
 

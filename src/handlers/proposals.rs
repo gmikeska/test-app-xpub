@@ -518,6 +518,12 @@ pub struct SignDataResponse {
     /// Liquid the browser doesn't have a Trezor sign path to invoke.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trezor: Option<TrezorSignRequest>,
+    /// Ledger BIP-388 wallet policy (`{name, descriptor_template, keys}`).
+    /// Populated only when the viewer's signer is a Ledger on a Bitcoin
+    /// federation; the browser builds a `WalletPolicy` from it, registers it
+    /// on-device, then signs. `None` for other devices / Liquid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<crate::ledger::LedgerWalletPolicy>,
 }
 
 /// `GET /federations/:id/proposals/:pid/sign-data`
@@ -596,6 +602,21 @@ pub async fn sign_data(
         }
     };
 
+    // Ledger needs the BIP-388 wallet policy to register + sign. SegWit
+    // (Bitcoin) only for now; the Taproot/Liquid policies are later phases.
+    let ledger = match kind {
+        FederationKind::Bitcoin if signer.device_type.eq_ignore_ascii_case("ledger") => Some(
+            crate::ledger::build_ledger_policy(
+                &row.label,
+                row.version_index,
+                row.threshold,
+                &cosigners,
+            )
+            .map_err(|e| AppError::BadRequest(e.to_string()))?,
+        ),
+        FederationKind::Bitcoin | FederationKind::Liquid => None,
+    };
+
     Ok(Json(SignDataResponse {
         psbt_b64: proposal.psbt_b64.clone(),
         descriptor,
@@ -605,6 +626,7 @@ pub async fn sign_data(
             FederationKind::Liquid => "liquid".to_string(),
         },
         trezor,
+        ledger,
     })
     .into_response())
 }

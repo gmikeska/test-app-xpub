@@ -33,8 +33,8 @@ pub fn parse_device_type(s: &str) -> DeviceType {
     }
 }
 
-/// Strict variant for the onboarding endpoint: only accept the two device
-/// types the app actually has UI for today (Trezor, Jade). Anything else
+/// Strict variant for the onboarding endpoint: only accept the device types
+/// the app actually has UI for today (Trezor, Jade, Ledger). Anything else
 /// is rejected with the original input echoed back so the user can see
 /// what the server received.
 ///
@@ -44,8 +44,9 @@ pub fn parse_onboard_device_type(s: &str) -> Result<DeviceType, String> {
     match s {
         "Trezor" => Ok(DeviceType::Trezor),
         "Jade" => Ok(DeviceType::Jade),
+        "Ledger" => Ok(DeviceType::Ledger),
         other => Err(format!(
-            "unsupported device_type `{other}` (expected Trezor or Jade)",
+            "unsupported device_type `{other}` (expected Trezor, Jade, or Ledger)",
         )),
     }
 }

@@ -21,8 +21,9 @@
     };
   </script>
   <script src="https://connect.trezor.io/9/trezor-connect.js"></script>
-  <script src="/static/onboard.js" defer></script>
+  <script src="/static/dist/onboard.js" type="module"></script>
   <script src="/static/onboard-jade.js?v=j8d2" type="module"></script>
+  <script src="/static/dist/ledger.js?v=l1" type="module"></script>
 {% endblock %}
 
 {% block content %}
@@ -44,6 +45,10 @@
     <label style="flex-direction:row; align-items:center; gap:8px;">
       <input type="radio" name="device-pick" value="jade">
       <span style="font-size:1rem; color:var(--text);">Blockstream Jade</span>
+    </label>
+    <label style="flex-direction:row; align-items:center; gap:8px;">
+      <input type="radio" name="device-pick" value="ledger">
+      <span style="font-size:1rem; color:var(--text);">Ledger</span>
     </label>
   </fieldset>
 
@@ -117,6 +122,41 @@
       </ul>
     </details>
   </div>
+
+  <!-- ---------------------------------------------------------------- -->
+  <!-- Ledger pane                                                      -->
+  <!-- ---------------------------------------------------------------- -->
+  <div id="device-pane-ledger" class="device-pane" hidden>
+    <h2 style="margin-top:24px;">Ledger</h2>
+    <p class="muted">Plug your Ledger in via USB, unlock it, and open the <strong>Bitcoin Test</strong> app (testnet/signet/regtest all use it). The browser will prompt you to grant WebUSB access once you click below.</p>
+    <form id="onboard-form-ledger" class="form">
+      <label>
+        <span>Label (optional)</span>
+        <input type="text" name="label" id="label-ledger" placeholder="e.g. My Ledger Nano S Plus" maxlength="64">
+      </label>
+      <button type="button" id="capture-btn-ledger" class="btn btn-primary">Connect Ledger &amp; capture XPUB</button>
+    </form>
+    <div id="status-ledger" class="status" role="status" aria-live="polite"></div>
+    <div id="result-ledger" class="result" hidden>
+      <h2>Captured</h2>
+      <dl class="kv">
+        <dt>Fingerprint</dt><dd><code id="r-fp-ledger"></code></dd>
+        <dt>Derivation path</dt><dd><code id="r-path-ledger"></code></dd>
+        <dt>XPUB</dt><dd><code id="r-xpub-ledger" class="break"></code></dd>
+        <dt>Descriptor key</dt><dd><code id="r-dk-ledger" class="break"></code></dd>
+      </dl>
+      <button type="button" id="save-btn-ledger" class="btn btn-primary">Save and continue</button>
+    </div>
+    <details class="hint">
+      <summary>Ledger troubleshooting</summary>
+      <ul>
+        <li>Use a Chromium-based desktop browser (Chrome, Edge, Brave) with WebUSB support.</li>
+        <li>On Linux, install Ledger's udev rules or the browser can't see the device.</li>
+        <li>Open the <strong>Bitcoin Test</strong> app on the device before capturing (a testnet path fails under the mainnet Bitcoin app).</li>
+        <li>Close Ledger Live and any other tab holding the device — only one app can talk to it at a time.</li>
+      </ul>
+    </details>
+  </div>
 </section>
 
 <script>
@@ -127,10 +167,12 @@
     const radios = document.querySelectorAll('input[name="device-pick"]');
     const trezorPane = document.getElementById("device-pane-trezor");
     const jadePane = document.getElementById("device-pane-jade");
+    const ledgerPane = document.getElementById("device-pane-ledger");
     function apply() {
       const picked = (document.querySelector('input[name="device-pick"]:checked') || {}).value;
       trezorPane.hidden = picked !== "trezor";
       jadePane.hidden = picked !== "jade";
+      ledgerPane.hidden = picked !== "ledger";
     }
     radios.forEach(function (r) { r.addEventListener("change", apply); });
     apply();

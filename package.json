@@ -8,9 +8,13 @@
     "dev": "vite build --watch"
   },
   "dependencies": {
-    "@emeraldlabs/emvault-jade": "file:../emvault-jade"
+    "@emeraldlabs/emvault-jade": "file:../emvault-jade",
+    "@ledgerhq/hw-transport-webusb": "^6.35.0",
+    "bitcoinjs-lib": "^6.1.7",
+    "ledger-bitcoin": "^0.3.0"
   },
   "devDependencies": {
-    "vite": "^5"
+    "vite": "^5",
+    "vite-plugin-node-polyfills": "^0.28.0"
   }
 }

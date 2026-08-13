@@ -26,6 +26,7 @@ pub mod elements_wallet;
 pub mod error;
 pub mod handlers;
 pub mod jade;
+pub mod ledger;
 pub mod models;
 pub mod wallet;
 
