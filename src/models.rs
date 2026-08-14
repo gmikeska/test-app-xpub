@@ -66,6 +66,12 @@ pub struct FederationRow {
     /// federations from before the dual-chain model stored a
     /// `ct(slip77(...), elwsh(sortedmulti(...)))` descriptor here instead.)
     pub descriptor: String,
+    /// On-chain script type: `"wsh"` (P2WSH multisig, default) or
+    /// `"taproot"` (`tr(NUMS-xpub, multi_a(...))`).
+    pub script_type: String,
+    /// Per-federation NUMS chain code for xpub-NUMS taproot federations
+    /// (recovery material; also embedded in the descriptor). `None` for wsh.
+    pub nums_chaincode: Option<Vec<u8>>,
     /// The Elements confidential descriptor `ct(slip77(mbk), elwsh(...))`,
     /// materialized at creation when every cosigner device is a Jade. `None`
     /// for Bitcoin-only federations. Its presence marks the federation as

@@ -88,6 +88,14 @@ pub async fn migrate_post(
 ) -> Result<Response, AppError> {
     let federation = load_active_current(&state, federation_id).await?;
     let is_liquid = db::FederationKind::from_row(&federation).is_liquid();
+    // Taproot migration (rotating a `tr(NUMS-xpub, multi_a)` lineage) isn't wired
+    // yet — the next-version build below is wsh-only. Guard so a taproot vault is
+    // never silently rebuilt as wsh.
+    if federation.script_type.eq_ignore_ascii_case("taproot") {
+        return Err(AppError::BadFederationInput(
+            "Migration of taproot federations isn't supported yet.".into(),
+        ));
+    }
     ensure_member(&state, federation_id, user.id).await?;
     ensure_no_inflight(&state, federation.lineage_id).await?;
 

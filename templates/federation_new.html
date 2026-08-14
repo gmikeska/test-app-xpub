@@ -29,6 +29,20 @@
       <input type="number" name="threshold" required min="1" step="1" value="2">
     </label>
 
+    <label>
+      <span>Script type</span>
+      <select name="script_type">
+        <option value="wsh" selected>SegWit — wsh(sortedmulti) — any device</option>
+        <option value="taproot">Taproot — tr(NUMS, multi_a) — Ledger only</option>
+      </select>
+    </label>
+
+    <label>
+      <span>NUMS chain code <span class="muted">(optional; taproot import only — 64 hex)</span></span>
+      <input type="text" name="nums_chaincode_hex" maxlength="64" autocomplete="off"
+             placeholder="leave blank for a fresh random chain code">
+    </label>
+
     <fieldset class="member-picker">
       <legend>Members</legend>
       <p class="muted">You're always a member of the federations you create. Check the other cosigners you'd like to include — they need a Trezor onboarded at <code>{{ derivation_path }}</code> first, otherwise the federation won't build.</p>

@@ -246,6 +246,10 @@ pub struct NewFederation<'a> {
     /// `/<0;1>/*`; Liquid uses
     /// `ct(slip77(<key>), elwsh(sortedmulti(m, ...)))` with `/<0;1>/*`.
     pub descriptor: &'a str,
+    /// `"wsh"` (default) or `"taproot"`.
+    pub script_type: &'a str,
+    /// Per-federation NUMS chain code for a taproot federation; `None` for wsh.
+    pub nums_chaincode: Option<&'a [u8]>,
     /// Elements confidential descriptor `ct(slip77(mbk), elwsh(...))`. `Some(_)`
     /// when the federation is Elements-capable (all-Jade); `None` otherwise.
     pub elements_descriptor: Option<&'a str>,
@@ -318,8 +322,9 @@ pub async fn insert_federation_with_members(
     sqlx::query(
         "INSERT INTO federations \
             (id, lineage_id, label, threshold, total_signers, network, descriptor, \
+             script_type, nums_chaincode, \
              elements_descriptor, snapshot_json, master_blinding_key) \
-         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9)",
+         VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(federation_id)
     .bind(spec.label)
@@ -327,6 +332,8 @@ pub async fn insert_federation_with_members(
     .bind(spec.total_signers)
     .bind(spec.network)
     .bind(spec.descriptor)
+    .bind(spec.script_type)
+    .bind(spec.nums_chaincode)
     .bind(spec.elements_descriptor)
     .bind(spec.snapshot_json)
     .bind(mbk_bytes)
@@ -363,7 +370,8 @@ pub async fn list_federations_for_user(
 ) -> sqlx::Result<Vec<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT f.id, f.label, f.threshold, f.total_signers, f.network, \
-                f.descriptor, f.elements_descriptor, f.snapshot_json, f.bdk_changeset, \
+                f.descriptor, f.script_type, f.nums_chaincode, \
+                f.elements_descriptor, f.snapshot_json, f.bdk_changeset, \
                 f.chain_tip_height, f.lineage_id, f.version_index, \
                 f.predecessor_id, f.status, f.migration_status, \
                 f.migration_sweep_txid, f.migration_sweep_confirmed_height, \
@@ -386,6 +394,7 @@ pub async fn list_federations_for_user(
 pub async fn find_federation_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<FederationRow>> {
     sqlx::query_as::<_, FederationRow>(
         "SELECT id, label, threshold, total_signers, network, descriptor, \
+                script_type, nums_chaincode, \
                 elements_descriptor, snapshot_json, bdk_changeset, chain_tip_height, \
                 lineage_id, version_index, predecessor_id, status, migration_status, \
                 migration_sweep_txid, migration_sweep_confirmed_height, \
@@ -934,6 +943,7 @@ mod versioning {
     use uuid::Uuid;
 
     const FEDERATION_COLS: &str = "id, label, threshold, total_signers, network, descriptor, \
+     script_type, nums_chaincode, \
      elements_descriptor, migration_sweep_confirmed_height, \
      snapshot_json, bdk_changeset, chain_tip_height, lineage_id, version_index, \
      predecessor_id, status, migration_status, migration_sweep_txid, \
@@ -1109,6 +1119,7 @@ mod versioning {
         sqlx::query_as::<_, FederationRow>(
             "SELECT DISTINCT ON (f.lineage_id) \
                     f.id, f.label, f.threshold, f.total_signers, f.network, f.descriptor, \
+                    f.script_type, f.nums_chaincode, \
                     f.elements_descriptor, f.snapshot_json, f.bdk_changeset, f.chain_tip_height, \
                     f.lineage_id, f.version_index, f.predecessor_id, f.status, f.migration_status, \
                     f.migration_sweep_txid, f.migration_sweep_confirmed_height, \

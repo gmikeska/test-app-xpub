@@ -152,6 +152,14 @@ pub struct NewFederationForm {
     /// would otherwise fail to deserialize a missing field into a `Vec`.
     #[serde(default)]
     pub member_ids: Vec<Uuid>,
+    /// On-chain script type: `"wsh"` (default) or `"taproot"`. Taproot is
+    /// gated to all-Ledger federations for now.
+    #[serde(default)]
+    pub script_type: Option<String>,
+    /// Optional 64-hex NUMS chain code for a taproot federation, to
+    /// reproduce/import an existing vault. Empty/absent → a fresh random one.
+    #[serde(default)]
+    pub nums_chaincode_hex: Option<String>,
 }
 
 /// `POST /federations`
@@ -227,6 +235,34 @@ pub async fn new_federation_post(
             .iter()
             .all(|(_, row)| matches!(parse_device_type(&row.device_type), DeviceType::Jade));
 
+    // Script type: default wsh. Taproot is gated to all-Ledger federations for
+    // now (multi_a signing on Trezor/Jade is unverified), and eligibility is
+    // double-checked against the core capability matrix.
+    let taproot = body
+        .script_type
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("taproot"));
+    let taproot_chaincode = if taproot {
+        if !resolved
+            .iter()
+            .all(|(_, r)| r.device_type.eq_ignore_ascii_case("ledger"))
+        {
+            return Err(AppError::BadFederationInput(
+                "Taproot federations currently require every signer to be a Ledger.".into(),
+            ));
+        }
+        if !emvault::core::available_script_types(&external_signers)
+            .contains(&emvault::core::ScriptType::Tr)
+        {
+            return Err(AppError::BadFederationInput(
+                "Not all signers support taproot.".into(),
+            ));
+        }
+        Some(parse_nums_chaincode(body.nums_chaincode_hex.as_deref())?)
+    } else {
+        None
+    };
+
     let federation_id = create_federation(
         &state,
         &label,
@@ -236,6 +272,7 @@ pub async fn new_federation_post(
         external_signers,
         &resolved,
         elements_capable,
+        taproot_chaincode,
     )
     .await?;
 
@@ -266,14 +303,36 @@ async fn create_federation(
     external_signers: Vec<ExternalSigner>,
     resolved: &[(Uuid, SignerRow)],
     elements_capable: bool,
+    taproot_chaincode: Option<emvault::core::NumsChaincode>,
 ) -> Result<Uuid, AppError> {
-    // Bitcoin descriptor + snapshot via the emvault-core facade.
+    // Bitcoin descriptor + snapshot via the emvault-core facade. Taproot
+    // (xpub-NUMS) when a chaincode is supplied; wsh otherwise.
     let network_type = NetworkType::Bitcoin(state.config.network);
-    let built =
-        emvault::core::build_federation(external_signers.clone(), threshold_u32, network_type)
-            .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
-    let descriptor_string = built.descriptor_string;
-    let snapshot_json = built.snapshot_json;
+    let (descriptor_string, snapshot_json, script_type_str, nums_cc): (
+        String,
+        serde_json::Value,
+        &'static str,
+        Option<[u8; 32]>,
+    ) = if let Some(nums) = taproot_chaincode {
+        let (built, cc) = emvault::core::build_federation_taproot_with(
+            external_signers.clone(),
+            threshold_u32,
+            network_type,
+            nums,
+        )
+        .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        (
+            built.descriptor_string,
+            built.snapshot_json,
+            "taproot",
+            Some(cc),
+        )
+    } else {
+        let built =
+            emvault::core::build_federation(external_signers.clone(), threshold_u32, network_type)
+                .map_err(|e| AppError::BadFederationInput(e.to_string()))?;
+        (built.descriptor_string, built.snapshot_json, "wsh", None)
+    };
     let network_str = state.config.network.to_string();
 
     // Elements confidential descriptor (all-Jade federations only). The
@@ -299,6 +358,8 @@ async fn create_federation(
         total_signers,
         network: &network_str,
         descriptor: &descriptor_string,
+        script_type: script_type_str,
+        nums_chaincode: nums_cc.as_ref().map(<[u8; 32]>::as_slice),
         elements_descriptor: elements_descriptor.as_deref(),
         snapshot_json: &snapshot_json,
         master_blinding_key: elements_capable.then_some(&mbk),
@@ -331,6 +392,27 @@ fn sanitise_label(raw: &str) -> Result<String, AppError> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// Parse an optional 64-hex NUMS chain code for a taproot federation:
+/// a valid value → [`NumsChaincode::Custom`] (import/reproduce an existing
+/// vault); empty or absent → [`NumsChaincode::Random`] (a fresh one).
+///
+/// [`NumsChaincode::Custom`]: emvault::core::NumsChaincode::Custom
+/// [`NumsChaincode::Random`]: emvault::core::NumsChaincode::Random
+fn parse_nums_chaincode(hex: Option<&str>) -> Result<emvault::core::NumsChaincode, AppError> {
+    use emvault::core::bitcoin::hex::FromHex;
+    match hex.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(emvault::core::NumsChaincode::Random),
+        Some(h) => {
+            let bytes = <[u8; 32]>::from_hex(h).map_err(|_| {
+                AppError::BadFederationInput(
+                    "NUMS chaincode must be 64 hex characters (32 bytes).".into(),
+                )
+            })?;
+            Ok(emvault::core::NumsChaincode::Custom(bytes))
+        }
+    }
 }
 
 /// Insert the creator into `ids` if missing, then sort + dedupe so the
