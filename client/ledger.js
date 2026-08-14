@@ -231,12 +231,26 @@ function wireSign() {
         throw new Error("Ledger returned no signatures — is this device a cosigner on this federation?");
       }
 
-      // Merge the per-input partial signatures into the base PSBT.
+      // Merge the per-input partial signatures into the base PSBT. Taproot
+      // script-path sigs (multi_a) carry a `tapleafHash` and go into
+      // `tapScriptSig` (Schnorr, x-only pubkey); SegWit sigs (ECDSA) go into
+      // `partialSig`. `signPsbt` tells us which via the presence of tapleafHash.
       const psbt = Psbt.fromBase64(sd.psbt_b64);
       for (const [index, ps] of entries) {
-        psbt.updateInput(index, {
-          partialSig: [{ pubkey: ps.pubkey, signature: ps.signature }],
-        });
+        if (ps.tapleafHash) {
+          // Ledger returns an x-only (32-byte) pubkey for taproot leaves; guard
+          // against a compressed (33-byte) form just in case.
+          const xonly = ps.pubkey.length === 33 ? ps.pubkey.subarray(1) : ps.pubkey;
+          psbt.updateInput(index, {
+            tapScriptSig: [
+              { leafHash: ps.tapleafHash, pubkey: xonly, signature: ps.signature },
+            ],
+          });
+        } else {
+          psbt.updateInput(index, {
+            partialSig: [{ pubkey: ps.pubkey, signature: ps.signature }],
+          });
+        }
       }
       const partialB64 = psbt.toBase64();
 
