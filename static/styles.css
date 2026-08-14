@@ -403,7 +403,8 @@ h2 { margin: 0 0 12px; font-size: 1.15rem; color: var(--text); }
 }
 .stack-form label { display: flex; flex-direction: column; gap: 6px; }
 .stack-form label span { font-size: 0.85rem; color: var(--muted); }
-.stack-form input {
+.stack-form input,
+.stack-form select {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -411,7 +412,18 @@ h2 { margin: 0 0 12px; font-size: 1.15rem; color: var(--text); }
   padding: 10px 12px;
   font: inherit;
 }
-.stack-form input:focus {
+.stack-form select {
+  -webkit-appearance: none;
+  appearance: none;
+  /* Custom chevron so the arrow matches the dark theme (native selects
+     otherwise render a light system control). */
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23999' d='M2 4l4 4 4-4z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+}
+.stack-form input:focus,
+.stack-form select:focus {
   outline: 2px solid var(--accent);
   outline-offset: 0;
   border-color: var(--accent);
