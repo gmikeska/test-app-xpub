@@ -602,18 +602,40 @@ pub async fn sign_data(
         }
     };
 
-    // Ledger needs the BIP-388 wallet policy to register + sign. SegWit
-    // (Bitcoin) only for now; the Taproot/Liquid policies are later phases.
+    // Ledger needs the BIP-388 wallet policy to register + sign. Bitcoin only
+    // (Liquid is Jade). Taproot feds emit the `tr(NUMS-xpub, multi_a)` policy
+    // (sourced from the same core builder as the funded descriptor); wsh feds
+    // emit `wsh(sortedmulti)`.
     let ledger = match kind {
-        FederationKind::Bitcoin if signer.device_type.eq_ignore_ascii_case("ledger") => Some(
-            crate::ledger::build_ledger_policy(
-                &row.label,
-                row.version_index,
-                row.threshold,
-                &cosigners,
-            )
-            .map_err(|e| AppError::BadRequest(e.to_string()))?,
-        ),
+        FederationKind::Bitcoin if signer.device_type.eq_ignore_ascii_case("ledger") => {
+            let policy = if row.script_type.eq_ignore_ascii_case("taproot") {
+                let chaincode: [u8; 32] = row
+                    .nums_chaincode
+                    .as_deref()
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .ok_or_else(|| {
+                        AppError::BadRequest(
+                            "taproot federation is missing its 32-byte nums_chaincode".to_string(),
+                        )
+                    })?;
+                crate::ledger::build_ledger_taproot_policy(
+                    &row.label,
+                    row.version_index,
+                    row.threshold,
+                    &cosigners,
+                    state.config.network,
+                    chaincode,
+                )
+            } else {
+                crate::ledger::build_ledger_policy(
+                    &row.label,
+                    row.version_index,
+                    row.threshold,
+                    &cosigners,
+                )
+            };
+            Some(policy.map_err(|e| AppError::BadRequest(e.to_string()))?)
+        }
         FederationKind::Bitcoin | FederationKind::Liquid => None,
     };
 

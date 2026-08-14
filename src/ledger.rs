@@ -27,6 +27,11 @@
 
 use serde::Serialize;
 
+use emvault::core::NetworkType;
+use emvault::core::bitcoin::Network;
+use emvault::xpub::ExternalSigner;
+
+use crate::handlers::common::parse_device_type;
 use crate::models::SignerRow;
 
 /// A Ledger wallet-policy registration payload (JSON-friendly form of
@@ -58,6 +63,9 @@ pub enum LedgerRegisterError {
     /// No cosigners were supplied.
     #[error("federation has no onboarded signers to register")]
     NoSigners,
+    /// Taproot policy assembly failed (signer parse or descriptor build).
+    #[error("failed to build taproot policy: {0}")]
+    Build(String),
 }
 
 /// Ledger's wallet-policy name limit, in bytes (BIP-388 / app constraint).
@@ -144,6 +152,68 @@ pub fn build_ledger_policy(
         name: ledger_reg_name(label, version_index),
         descriptor_template,
         keys,
+    })
+}
+
+/// Build a Ledger wallet policy for a **Taproot** (`tr(NUMS-xpub, multi_a)`)
+/// federation, sourced from `emvault-core`'s `bip388_taproot_policy` so the
+/// template + key order + NUMS xpub match the funded scriptPubKeys exactly
+/// (single source of truth). `chaincode` is the federation's stored
+/// `nums_chaincode`; `network` its Bitcoin network.
+///
+/// Produces `tr(@0/**, multi_a(m, @1/**, …))` with `@0` = the NUMS xpub and the
+/// cosigners in descriptor order.
+///
+/// # Errors
+/// [`LedgerRegisterError`] if there are no signers, the threshold is out of
+/// range, a signer's descriptor key won't parse, or the core policy build fails.
+pub fn build_ledger_taproot_policy(
+    label: &str,
+    version_index: i32,
+    threshold: i32,
+    cosigners: &[SignerRow],
+    network: Network,
+    chaincode: [u8; 32],
+) -> Result<LedgerWalletPolicy, LedgerRegisterError> {
+    if cosigners.is_empty() {
+        return Err(LedgerRegisterError::NoSigners);
+    }
+    let n = cosigners.len();
+    let threshold_u32 = u32::try_from(threshold)
+        .ok()
+        .filter(|m| *m >= 1 && usize::try_from(*m).is_ok_and(|m| m <= n))
+        .ok_or(LedgerRegisterError::BadThreshold {
+            threshold,
+            signers: n,
+        })?;
+
+    // Parse each stored signer row into an `ExternalSigner`, then let core
+    // assemble the policy with the identical setup used to build the funded
+    // descriptor (single source of truth).
+    let mut signers = Vec::with_capacity(n);
+    for row in cosigners {
+        let signer = ExternalSigner::from_descriptor_key(
+            row.descriptor_key.trim(),
+            network,
+            parse_device_type(&row.device_type),
+            row.label.clone(),
+        )
+        .map_err(|e| LedgerRegisterError::Build(e.to_string()))?;
+        signers.push(signer);
+    }
+
+    let policy = emvault::core::bip388_taproot_policy(
+        &signers,
+        threshold_u32,
+        NetworkType::Bitcoin(network),
+        chaincode,
+    )
+    .map_err(|e| LedgerRegisterError::Build(e.to_string()))?;
+
+    Ok(LedgerWalletPolicy {
+        name: ledger_reg_name(label, version_index),
+        descriptor_template: policy.template,
+        keys: policy.keys,
     })
 }
 
