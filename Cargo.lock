@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "emvault"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emvault-core",
  "emvault-elements",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bdk_bitcoind_rpc",
  "bdk_wallet",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-electrum"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bdk_electrum",
  "bdk_wallet",
@@ -1129,7 +1129,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-elements"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bitcoin",
  "bitcoincore-rpc",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-esplora"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -1156,7 +1156,9 @@ dependencies = [
 
 [[package]]
 name = "emvault-pkcs11"
-version = "0.7.0"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2115bdfdc764cb4c0a2a36c0dd299863dc1252c1f38486f93a5a38c9f166ffcd"
 dependencies = [
  "bdk_wallet",
  "bitcoin",
@@ -1174,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "emvault-xpub"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bip39",
  "bitcoin",
@@ -3906,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "test-app-xpub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "askama",
