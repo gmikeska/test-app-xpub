@@ -1,6 +1,6 @@
 [package]
 name = "test-app-xpub"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Test web app exercising emvault-xpub: user login, Trezor onboarding (XPUB capture via Trezor Connect), and federation membership homepage."
 license = "MIT OR Apache-2.0"
@@ -20,7 +20,7 @@ publish = false
 # Those crates' types cross the EmVault API, so we consume them through the
 # ecosystem's canonical re-exports (`emvault::core::*`, `emvault::elements::*`)
 # — single source of truth, no version drift between the app and the library.
-emvault = { version = "0.8", features = [
+emvault = { version = "0.9", features = [
     "xpub",
     "esplora",
     "electrum",
@@ -97,7 +97,7 @@ axum-extra = { version = "0.12.6", features = ["form"] }
 # `wsh(sortedmulti)` federation from mnemonics with no physical device. Cargo
 # unions this with the normal `emvault` dep, so the test build gets xpub +
 # test-utils.
-emvault = { version = "0.8", features = ["test-utils"] }
+emvault = { version = "0.9", features = ["test-utils"] }
 
 [features]
 # DB-layer tests (`#[sqlx::test]`) that need a reachable Postgres. Off by
