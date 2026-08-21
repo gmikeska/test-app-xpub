@@ -202,6 +202,9 @@ struct ReceiveTemplate {
     /// One panel per version the viewer is entitled to (newest first); the
     /// panel for the page's `federation_id` is `selected` by default.
     federation_groups: Vec<FederationGroupView>,
+    /// "Holdings by asset" rows for the selected version (Liquid only; empty
+    /// for Bitcoin).
+    asset_balances: Vec<AssetHoldingView>,
     active_tab: &'static str,
 }
 
@@ -215,10 +218,34 @@ struct FederationGroupView {
     label: String,
     /// The default-open panel (the version the user navigated to).
     selected: bool,
-    /// Revealed external (receive) addresses for this version.
+    /// Revealed external (receive) addresses for this version (Bitcoin path).
     addresses: Vec<AddressView>,
     /// Internal (change) addresses for this version that have held funds.
     change_addresses: Vec<AddressView>,
+    /// Per-asset address panels (Liquid path) — one entry per asset, policy
+    /// asset first. Empty for Bitcoin federations.
+    assets: Vec<AssetAddrGroupView>,
+}
+
+/// One asset's receive-address rows within a version (a Liquid asset sub-tab).
+#[derive(Debug, Serialize)]
+struct AssetAddrGroupView {
+    /// Full asset id (panel id + `?asset=` deep link).
+    asset_id: String,
+    /// Tab title: "L-BTC" for the policy asset, else the first 4 id chars.
+    asset_label: String,
+    is_policy: bool,
+    /// Active-by-default tab (the policy asset).
+    is_active: bool,
+    addresses: Vec<AddressView>,
+}
+
+/// One "Holdings by asset" row on the Liquid receive page.
+#[derive(Debug, Serialize)]
+struct AssetHoldingView {
+    asset_id: String,
+    is_policy: bool,
+    amount: String,
 }
 
 /// Send tab — proposal form + proposals table.
@@ -234,6 +261,10 @@ struct SendTemplate {
     /// version but not the current one): the recipient is locked to the current
     /// federation's address. `None` for current signers (free recipient).
     locked_recipient: Option<String>,
+    /// Liquid only: the assets held by this federation, for the Send form's
+    /// asset picker. Policy asset (L-BTC) first, then issued assets. Empty on
+    /// Bitcoin (the picker is hidden).
+    asset_options: Vec<AssetHoldingView>,
     active_tab: &'static str,
 }
 
@@ -250,6 +281,9 @@ pub async fn redirect_to_default(Path(id): Path<Uuid>) -> Redirect {
 }
 
 /// `GET /federations/:id/receive`
+// Per-version × per-asset address grouping (Liquid) plus the Bitcoin flat-table
+// path share one handler; the branch-heavy body reads better whole than split.
+#[allow(clippy::too_many_lines)]
 pub async fn receive(
     State(state): State<Arc<AppState>>,
     AuthUser(user): AuthUser,
@@ -272,36 +306,72 @@ pub async fn receive(
     let mut federation_groups = Vec::with_capacity(visible.len());
     let mut header_tip = federation.tip_height;
     let mut header_balance: Option<BalanceView> = None;
+    let mut header_holdings: Vec<AssetHoldingView> = Vec::new();
     for v in visible.iter().rev() {
-        let (tip_height, addresses, change_addresses) = if is_liquid {
+        let (tip_height, addresses, change_addresses, assets) = if is_liquid {
             let vw = state.elements_wallets.load_or_init(v.id).await?;
             let sync = vw.sync().await?;
-            // Real per-address totals in one pass (LWK stamps each wallet output
-            // with its keychain + index), keyed by (is_external, index).
-            let activity = vw.address_activity_map().await?;
-            let addresses = vw
-                .reveal_addresses(ELEMENTS_REVEAL_COUNT)
-                .await?
-                .into_iter()
-                .map(|a| {
-                    let (recv, unspent) = activity.get(&(true, a.index)).copied().unwrap_or((0, 0));
-                    AddressView {
-                        index: a.index,
-                        address: a.address,
-                        received_btc: format_btc_sats(recv),
-                        unspent_btc: format_btc_sats(unspent),
+            let revealed = vw.reveal_addresses(ELEMENTS_REVEAL_COUNT).await?;
+            // Per-asset per-address totals in one tx-history pass, policy first.
+            let (policy_hex, by_asset) = vw.address_activity_map_by_asset().await?;
+            let mut asset_ids: Vec<String> = vec![policy_hex.clone()];
+            for k in by_asset.keys() {
+                if *k != policy_hex {
+                    asset_ids.push(k.clone());
+                }
+            }
+            let assets: Vec<AssetAddrGroupView> = asset_ids
+                .iter()
+                .map(|aid| {
+                    let amap = by_asset.get(aid);
+                    let addrs = revealed
+                        .iter()
+                        .map(|a| {
+                            let (recv, unspent) = amap
+                                .and_then(|m| m.get(&(true, a.index)).copied())
+                                .unwrap_or((0, 0));
+                            AddressView {
+                                index: a.index,
+                                address: a.address.clone(),
+                                received_btc: format_btc_sats(recv),
+                                unspent_btc: format_btc_sats(unspent),
+                            }
+                        })
+                        .collect();
+                    let is_policy = *aid == policy_hex;
+                    AssetAddrGroupView {
+                        asset_label: if is_policy {
+                            "L-BTC".to_string()
+                        } else {
+                            aid.chars().take(4).collect()
+                        },
+                        is_policy,
+                        is_active: is_policy,
+                        addresses: addrs,
+                        asset_id: aid.clone(),
                     }
                 })
                 .collect();
             if v.id == federation_id {
                 let reserved =
-                    db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+                    db::sum_inflight_inputs_for_federation(&state.db, federation_id, "elements")
+                        .await?;
                 let lbtc_sat = vw.lbtc_balance_sat().await?;
                 header_balance = Some(BalanceView::from_lbtc_sat(lbtc_sat, reserved));
+                header_holdings = vw
+                    .asset_balances()
+                    .await?
+                    .into_iter()
+                    .map(|b| AssetHoldingView {
+                        is_policy: b.is_policy,
+                        asset_id: b.asset_id,
+                        amount: format_btc_sats(b.sat),
+                    })
+                    .collect();
             }
             // LWK's Wollet doesn't expose change addresses as a simple lookup;
             // Liquid change-address rows stay out of scope (as before).
-            (sync.tip_height, addresses, Vec::new())
+            (sync.tip_height, Vec::new(), Vec::new(), assets)
         } else {
             let vw = state.wallets.load_or_init(v.id).await?;
             let sync = vw.sync().await?;
@@ -319,10 +389,11 @@ pub async fn receive(
                 .collect();
             if v.id == federation_id {
                 let reserved =
-                    db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+                    db::sum_inflight_inputs_for_federation(&state.db, federation_id, "bitcoin")
+                        .await?;
                 header_balance = Some(BalanceView::from_balance(&vw.balance().await, reserved));
             }
-            (sync.tip_height, addresses, change_addresses)
+            (sync.tip_height, addresses, change_addresses, Vec::new())
         };
         let label = if v.status == "active" {
             format!("v{} (current)", v.version_index + 1)
@@ -339,6 +410,7 @@ pub async fn receive(
             selected: v.id == federation_id,
             addresses,
             change_addresses,
+            assets,
         });
     }
 
@@ -354,6 +426,7 @@ pub async fn receive(
         cosigners,
         balance,
         federation_groups,
+        asset_balances: header_holdings,
         active_tab: "receive",
     }
     .into_response())
@@ -369,12 +442,13 @@ pub async fn send(
     let (federation, cosigners) =
         load_header(&state, federation_id, user.id, cq.chain.as_deref()).await?;
 
+    let mut asset_options: Vec<AssetHoldingView> = Vec::new();
     let (federation, balance) = match federation_kind(&federation) {
         FederationKind::Bitcoin => {
             let fw = state.wallets.load_or_init(federation_id).await?;
             let sync = fw.sync().await?;
             let reserved_sat =
-                db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+                db::sum_inflight_inputs_for_federation(&state.db, federation_id, "bitcoin").await?;
             let balance = BalanceView::from_balance(&fw.balance().await, reserved_sat);
             (
                 FederationView {
@@ -388,9 +462,21 @@ pub async fn send(
             let fw = state.elements_wallets.load_or_init(federation_id).await?;
             let sync = fw.sync().await?;
             let reserved_sat =
-                db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+                db::sum_inflight_inputs_for_federation(&state.db, federation_id, "elements")
+                    .await?;
             let lbtc_sat = fw.lbtc_balance_sat().await?;
             let balance = BalanceView::from_lbtc_sat(lbtc_sat, reserved_sat);
+            // Asset picker options — policy asset (L-BTC) first, then issued.
+            asset_options = fw
+                .asset_balances()
+                .await?
+                .into_iter()
+                .map(|b| AssetHoldingView {
+                    asset_id: b.asset_id,
+                    is_policy: b.is_policy,
+                    amount: format_btc_sats(b.sat),
+                })
+                .collect();
             (
                 FederationView {
                     tip_height: sync.tip_height,
@@ -461,6 +547,7 @@ pub async fn send(
         balance,
         proposals,
         locked_recipient,
+        asset_options,
         active_tab: "send",
     }
     .into_response())
@@ -569,6 +656,10 @@ pub struct ChainQuery {
     /// `"elements"` selects the Liquid view of a dual-chain federation;
     /// anything else (or absent) is the default Bitcoin view.
     pub chain: Option<String>,
+    /// Liquid address-detail only: which asset tab to preselect (full asset
+    /// id). Defaults to the policy asset. Ignored for Bitcoin.
+    #[serde(default)]
+    pub asset: Option<String>,
 }
 
 /// Resolve the active chain for a federation view: Elements iff the caller

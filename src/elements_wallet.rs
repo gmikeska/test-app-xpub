@@ -44,7 +44,7 @@ use emvault::elements::elements::pset::PartiallySignedTransaction as Pset;
 use emvault::elements::lwk_wollet::asyncr::{EsploraClient, EsploraClientBuilder};
 use emvault::elements::lwk_wollet::blocking::BlockchainBackend;
 use emvault::elements::lwk_wollet::elements::{
-    Address, AddressParams, OutPoint, Transaction, Txid, encode::serialize_hex,
+    Address, AddressParams, AssetId, OutPoint, Transaction, Txid, encode::serialize_hex,
 };
 use emvault::elements::lwk_wollet::{
     Chain, ElectrumClient, ElectrumUrl, TxBuilder, Update, Wollet, WolletBuilder, WolletDescriptor,
@@ -622,6 +622,166 @@ impl LiquidFederationWallet {
         Ok(map)
     }
 
+    /// Per-asset wallet balances (current unspent), one row per held asset —
+    /// the policy asset (L-BTC) first, then issued assets by descending amount.
+    /// Drives the "Holdings by asset" panel.
+    ///
+    /// # Errors
+    /// Propagates LWK balance errors.
+    pub async fn asset_balances(&self) -> Result<Vec<LiquidAssetBalance>, ElementsWalletError> {
+        let wollet = self.inner.lock().await;
+        let policy = wollet.policy_asset();
+        let bal = wollet
+            .balance()
+            .map_err(|e| ElementsWalletError::Balance(e.to_string()))?;
+        let mut out: Vec<LiquidAssetBalance> = bal
+            .iter()
+            .map(|(asset, sat)| LiquidAssetBalance {
+                is_policy: *asset == policy,
+                asset_id: asset.to_string(),
+                sat: *sat,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.is_policy
+                .cmp(&a.is_policy)
+                .then_with(|| b.sat.cmp(&a.sat))
+        });
+        Ok(out)
+    }
+
+    /// The wallet's policy-asset id (L-BTC) as a hex string.
+    ///
+    /// # Errors
+    /// Infallible today; returns `Result` for call-site symmetry.
+    pub async fn policy_asset_hex(&self) -> Result<String, ElementsWalletError> {
+        Ok(self.inner.lock().await.policy_asset().to_string())
+    }
+
+    /// Full unspent balance of a single asset (sats), for per-asset Send-Max.
+    ///
+    /// # Errors
+    /// Propagates LWK balance errors.
+    pub async fn asset_total_sat(&self, asset_hex: &str) -> Result<u64, ElementsWalletError> {
+        let wollet = self.inner.lock().await;
+        let bal = wollet
+            .balance()
+            .map_err(|e| ElementsWalletError::Balance(e.to_string()))?;
+        Ok(bal
+            .iter()
+            .find(|(a, _)| a.to_string() == asset_hex)
+            .map_or(0, |(_, v)| *v))
+    }
+
+    /// Per-**asset**, per-address totals for the whole wallet in one tx-history
+    /// pass. Returns the policy-asset hex plus `asset_hex → { (is_external,
+    /// index) → (received_sat, unspent_sat) }`. Unlike [`address_activity_map`]
+    /// (policy-only), this keeps every asset distinct — drives the per-asset
+    /// receive tabs.
+    ///
+    /// # Errors
+    /// Propagates LWK `utxos` / `transactions` errors.
+    #[allow(clippy::type_complexity)]
+    pub async fn address_activity_map_by_asset(
+        &self,
+    ) -> Result<
+        (
+            String,
+            std::collections::BTreeMap<String, HashMap<(bool, u32), (u64, u64)>>,
+        ),
+        ElementsWalletError,
+    > {
+        let wollet = self.inner.lock().await;
+        let policy = wollet.policy_asset();
+        let unspent: HashSet<OutPoint> = wollet
+            .utxos()
+            .map_err(|e| ElementsWalletError::Utxos(e.to_string()))?
+            .iter()
+            .map(|u| u.outpoint)
+            .collect();
+        let txs = wollet
+            .transactions()
+            .map_err(|e| ElementsWalletError::Transactions(e.to_string()))?;
+
+        let mut by_asset: std::collections::BTreeMap<String, HashMap<(bool, u32), (u64, u64)>> =
+            std::collections::BTreeMap::new();
+        for tx in &txs {
+            for out in tx.outputs.iter().flatten() {
+                let key = (matches!(out.ext_int, Chain::External), out.wildcard_index);
+                let entry = by_asset
+                    .entry(out.unblinded.asset.to_string())
+                    .or_default()
+                    .entry(key)
+                    .or_default();
+                entry.0 = entry.0.saturating_add(out.unblinded.value);
+                if unspent.contains(&out.outpoint) {
+                    entry.1 = entry.1.saturating_add(out.unblinded.value);
+                }
+            }
+        }
+        Ok((policy.to_string(), by_asset))
+    }
+
+    /// Per-**asset** activity at a single address (policy asset first) — the
+    /// per-asset analog of [`address_activity`](Self::address_activity), for the
+    /// address-detail asset tabs.
+    ///
+    /// # Errors
+    /// Propagates LWK `utxos` / `transactions` errors.
+    pub async fn address_activity_by_asset(
+        &self,
+        chain: Chain,
+        index: u32,
+    ) -> Result<Vec<LiquidAssetActivity>, ElementsWalletError> {
+        let wollet = self.inner.lock().await;
+        let policy = wollet.policy_asset();
+        let unspent: HashSet<OutPoint> = wollet
+            .utxos()
+            .map_err(|e| ElementsWalletError::Utxos(e.to_string()))?
+            .iter()
+            .map(|u| u.outpoint)
+            .collect();
+        let txs = wollet
+            .transactions()
+            .map_err(|e| ElementsWalletError::Transactions(e.to_string()))?;
+
+        let mut by_asset: std::collections::BTreeMap<String, LiquidAssetActivity> =
+            std::collections::BTreeMap::new();
+        for tx in &txs {
+            for out in tx.outputs.iter().flatten() {
+                if out.ext_int != chain || out.wildcard_index != index {
+                    continue;
+                }
+                let asset = out.unblinded.asset.to_string();
+                let is_spent = !unspent.contains(&out.outpoint);
+                let a = by_asset
+                    .entry(asset.clone())
+                    .or_insert_with(|| LiquidAssetActivity {
+                        is_policy: out.unblinded.asset == policy,
+                        asset_id: asset,
+                        received_sat: 0,
+                        unspent_sat: 0,
+                        receipts: Vec::new(),
+                    });
+                a.received_sat = a.received_sat.saturating_add(out.unblinded.value);
+                if !is_spent {
+                    a.unspent_sat = a.unspent_sat.saturating_add(out.unblinded.value);
+                }
+                a.receipts.push(LiquidReceipt {
+                    txid: out.outpoint.txid,
+                    vout: out.outpoint.vout,
+                    amount_sat: out.unblinded.value,
+                    height: out.height,
+                    is_spent,
+                });
+            }
+        }
+        let policy_hex = policy.to_string();
+        let mut out: Vec<LiquidAssetActivity> = by_asset.into_values().collect();
+        out.sort_by_key(|x| x.asset_id != policy_hex);
+        Ok(out)
+    }
+
     /// Current chain tip height the wallet is aware of.
     /// Fetch the current chain-tip height **directly from the configured
     /// backend** (esplora/waterfalls or electrum) without a full wallet scan —
@@ -685,6 +845,13 @@ impl LiquidFederationWallet {
 
     /// Build an unsigned PSET for a single L-BTC recipient.
     ///
+    /// Build an explicit-amount proposal PSET sending `satoshi` of `asset` to
+    /// `recipient`. `asset` is an asset-id hex string; `None`, `"L-BTC"`, or the
+    /// policy-asset id all resolve to the policy asset (L-BTC, via LWK's
+    /// `add_lbtc_recipient`). Any other id sends an **issued asset** via
+    /// `add_recipient`; the network fee is always paid in L-BTC (LWK adds the
+    /// L-BTC fee + change automatically), so an asset send needs some L-BTC too.
+    ///
     /// # Errors
     /// - [`ElementsWalletError::BuildPset`] for any LWK error during
     ///   coin selection / blinding.
@@ -693,10 +860,18 @@ impl LiquidFederationWallet {
         &self,
         recipient: &Address,
         satoshi: u64,
+        asset: Option<&str>,
         fee_rate_sat_vb: Option<u64>,
     ) -> Result<BuiltLiquidProposal, ElementsWalletError> {
-        let (pset_b64, fee_sat, input_count) = {
+        let (pset_b64, fee_sat, input_count, asset_label) = {
             let wollet = self.inner.lock().await;
+            let policy_hex = wollet.policy_asset().to_string();
+            // Absent / "L-BTC" / the policy id itself all mean the policy asset;
+            // anything else is an issued asset addressed by id.
+            let is_policy = match asset {
+                None => true,
+                Some(a) => a.eq_ignore_ascii_case("l-btc") || a == policy_hex,
+            };
             // sats/vB → sats/kvB; LWK takes f32 sats/kvB. The cast is
             // safe in practice because fee rates fit in 24 bits long
             // before precision loss matters.
@@ -706,9 +881,18 @@ impl LiquidFederationWallet {
                 v
             });
 
-            let mut builder = TxBuilder::new(self.network.to_lwk())
-                .add_lbtc_recipient(recipient, satoshi)
-                .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            let mut builder = if is_policy {
+                TxBuilder::new(self.network.to_lwk())
+                    .add_lbtc_recipient(recipient, satoshi)
+                    .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?
+            } else {
+                let asset_id = AssetId::from_str(asset.unwrap_or_default()).map_err(|e| {
+                    ElementsWalletError::BuildPset(format!("invalid asset id: {e}"))
+                })?;
+                TxBuilder::new(self.network.to_lwk())
+                    .add_recipient(recipient, satoshi, asset_id)
+                    .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?
+            };
             builder = builder.fee_rate(lwk_fee_rate);
             let pset = builder
                 .finish(&wollet)
@@ -723,14 +907,19 @@ impl LiquidFederationWallet {
                 .find(|o| o.script_pubkey.is_empty())
                 .and_then(|o| o.amount)
                 .unwrap_or(0);
+            let asset_label = if is_policy {
+                "L-BTC".to_string()
+            } else {
+                asset.unwrap_or_default().to_string()
+            };
             drop(wollet);
-            (pset.to_string(), fee_sat, input_count)
+            (pset.to_string(), fee_sat, input_count, asset_label)
         };
 
         let proposal_json = serde_json::json!({
             "recipient": recipient.to_string(),
             "recipient_amount_sat": satoshi,
-            "asset": "L-BTC",
+            "asset": asset_label,
             "fee_rate_sat_vb": fee_rate_sat_vb,
             "fee_sat": fee_sat,
             "input_count": input_count,
@@ -750,37 +939,54 @@ impl LiquidFederationWallet {
         })
     }
 
-    /// Build a **drain** (send-max) PSET sweeping this federation's entire L-BTC
-    /// balance to `destination` — the migration sweep from the current Liquid
-    /// federation to its successor. Same shape as [`Self::build_proposal`] but
-    /// uses LWK's `drain_lbtc_wallet`, so the full balance minus the mining fee
-    /// lands at the successor's address. The successor recognises the inflow once
-    /// it syncs its own CT descriptor. Signing / finalize / broadcast reuse the
-    /// regular Liquid proposal path.
+    /// Build the migration sweep PSET moving this federation's **entire holdings —
+    /// L-BTC *and* every issued asset** — to `destination` (the successor's first
+    /// CT address). Each non-policy asset is added as a full-balance recipient, then
+    /// LWK's `drain_lbtc_wallet` sweeps the remaining L-BTC (minus the mining fee,
+    /// which is always paid in L-BTC). The successor recognises the inflow once it
+    /// syncs its own CT descriptor. Signing / finalize / broadcast reuse the regular
+    /// Liquid proposal path.
+    ///
+    /// A pure-L-BTC federation degrades to a plain L-BTC drain (no asset recipients).
     ///
     /// # Errors
-    /// [`ElementsWalletError::BuildPset`] if LWK cannot build the drain (e.g. no
-    /// spendable balance, or fee exceeds value).
+    /// [`ElementsWalletError::BuildPset`] if LWK cannot build the sweep (e.g. nothing
+    /// spendable, or no L-BTC to cover the fee when assets are present).
     pub async fn build_migration_pset(
         &self,
         destination: &Address,
         fee_rate_sat_vb: Option<u64>,
     ) -> Result<BuiltLiquidProposal, ElementsWalletError> {
-        let (pset_b64, drained_sat, fee_sat, input_count) = {
+        let (pset_b64, drained_sat, fee_sat, input_count, assets_json) = {
             let wollet = self.inner.lock().await;
             let policy = wollet.policy_asset();
             let balance = wollet
                 .balance()
-                .map_err(|e| ElementsWalletError::Balance(e.to_string()))?
-                .get(&policy)
-                .copied()
-                .unwrap_or(0);
+                .map_err(|e| ElementsWalletError::Balance(e.to_string()))?;
+            let lbtc = balance.get(&policy).copied().unwrap_or(0);
+            // Every issued (non-policy) asset held, swept in full. Sorted by id for
+            // a deterministic PSET / proposal view.
+            let mut assets: Vec<(AssetId, u64)> = balance
+                .iter()
+                .filter(|(a, v)| **a != policy && **v > 0)
+                .map(|(a, v)| (*a, *v))
+                .collect();
+            assets.sort_by_key(|(a, _)| a.to_string());
             let lwk_fee_rate = fee_rate_sat_vb.map(|sat_vb| {
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 let v = (sat_vb as f64 * 1000.0) as f32;
                 v
             });
-            let pset = TxBuilder::new(self.network.to_lwk())
+            // Explicit full-balance recipient per issued asset, then drain the L-BTC
+            // remainder. The asset recipients pull all asset UTXOs; drain_lbtc pulls
+            // the L-BTC (value + fee). One PSET carries the whole federation forward.
+            let mut builder = TxBuilder::new(self.network.to_lwk());
+            for (asset, amt) in &assets {
+                builder = builder
+                    .add_recipient(destination, *amt, *asset)
+                    .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
+            }
+            let pset = builder
                 .drain_lbtc_wallet()
                 .drain_lbtc_to(destination.clone())
                 .fee_rate(lwk_fee_rate)
@@ -788,27 +994,32 @@ impl LiquidFederationWallet {
                 .map_err(|e| ElementsWalletError::BuildPset(e.to_string()))?;
             let input_count = pset.inputs().len();
             // The fee output is the explicit, script-less output; everything else
-            // is swept to the destination, so drained = balance − fee.
+            // is swept to the destination, so L-BTC drained = balance − fee.
             let fee_sat = pset
                 .outputs()
                 .iter()
                 .find(|o| o.script_pubkey.is_empty())
                 .and_then(|o| o.amount)
                 .unwrap_or(0);
+            let assets_json: Vec<serde_json::Value> = assets
+                .iter()
+                .map(|(a, v)| serde_json::json!({ "asset": a.to_string(), "amount_sat": v }))
+                .collect();
             drop(wollet);
             (
                 pset.to_string(),
-                balance.saturating_sub(fee_sat),
+                lbtc.saturating_sub(fee_sat),
                 fee_sat,
                 input_count,
+                assets_json,
             )
         };
 
-        // A drain that selected no inputs means the wallet holds no spendable
-        // L-BTC — surface it rather than persist a confusing zero-value sweep.
+        // A sweep that selected no inputs means the wallet holds nothing spendable —
+        // surface it rather than persist a confusing zero-value migration.
         if input_count == 0 {
             return Err(ElementsWalletError::BuildPset(
-                "migration sweep selected no inputs — the wallet has no spendable L-BTC \
+                "migration sweep selected no inputs — the wallet has no spendable balance \
                  (has the deposit confirmed and synced?)"
                     .to_string(),
             ));
@@ -819,6 +1030,7 @@ impl LiquidFederationWallet {
             "recipient_amount_sat": drained_sat,
             "kind": "migration",
             "asset": "L-BTC",
+            "assets_swept": assets_json.clone(),
             "fee_rate_sat_vb": fee_rate_sat_vb,
             "fee_sat": fee_sat,
             "input_count": input_count,
@@ -826,9 +1038,10 @@ impl LiquidFederationWallet {
         let coin_selection_json = serde_json::json!({
             "selected": [],
             "outputs": [{ "address": destination.to_string(), "amount_sat": drained_sat }],
+            "assets_swept": assets_json,
             "fee_sat": fee_sat,
             "total_input_sat": drained_sat + fee_sat,
-            "note": "LWK-driven drain sweep.",
+            "note": "LWK-driven migration sweep (L-BTC + all issued assets).",
         });
 
         Ok(BuiltLiquidProposal {
@@ -1140,6 +1353,33 @@ pub struct LiquidReceipt {
     pub height: Option<u32>,
     /// `true` once the output has been spent.
     pub is_spent: bool,
+}
+
+/// One asset's current unspent balance — a "Holdings by asset" row.
+#[derive(Debug, Clone)]
+pub struct LiquidAssetBalance {
+    /// Asset id (hex).
+    pub asset_id: String,
+    /// Whether this is the policy asset (rendered as "L-BTC").
+    pub is_policy: bool,
+    /// Unspent amount in base units (sats / 8-decimal asset units).
+    pub sat: u64,
+}
+
+/// One asset's activity at a single address — the per-asset analog of
+/// [`LiquidAddressActivity`], for the address-detail asset tabs.
+#[derive(Debug, Clone)]
+pub struct LiquidAssetActivity {
+    /// Asset id (hex).
+    pub asset_id: String,
+    /// Whether this is the policy asset (rendered as "L-BTC").
+    pub is_policy: bool,
+    /// Total received at this address for this asset (sats).
+    pub received_sat: u64,
+    /// Still-unspent amount for this asset (sats).
+    pub unspent_sat: u64,
+    /// One receipt per wallet-owned output of this asset paid to the address.
+    pub receipts: Vec<LiquidReceipt>,
 }
 
 /// Output of [`LiquidFederationWallet::build_proposal`].

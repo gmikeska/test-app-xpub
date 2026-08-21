@@ -36,12 +36,30 @@ struct AddressDetailTemplate {
     federation: FederationHeader,
     /// Address-level info.
     address: AddressInfoView,
-    /// Receipts (incoming UTXOs).
+    /// Receipts (incoming UTXOs) — the Bitcoin path. For Liquid these live
+    /// per-asset in `asset_activities` instead.
     receipts: Vec<ReceiptView>,
+    /// Liquid: one panel per asset with activity at this address (asset tabs).
+    /// Empty for Bitcoin.
+    asset_activities: Vec<AddressAssetActivityView>,
     /// `true` for Liquid federations, where LWK v1 exposes no per-address
     /// activity — the template hides the BTC-denominated receipt/balance rows
     /// and the `bitcoin-cli` funding hint.
     is_liquid: bool,
+}
+
+/// One asset's activity panel on the Liquid address-detail page (asset tab).
+#[derive(Debug, Serialize)]
+struct AddressAssetActivityView {
+    asset_id: String,
+    asset_label: String,
+    is_policy: bool,
+    /// Active tab (from `?asset=`, else the policy asset).
+    is_active: bool,
+    total_received_btc: String,
+    unspent_btc: String,
+    receipt_count: usize,
+    receipts: Vec<ReceiptView>,
 }
 
 /// Lightweight federation header for the breadcrumb / "back" link.
@@ -124,7 +142,7 @@ pub async fn show(
     if crate::handlers::federations::resolve_active_chain(&row, cq.chain.as_deref())
         == FederationKind::Liquid
     {
-        return render_liquid_address_detail(&state, user.email, row, &address_raw).await;
+        return render_liquid_address_detail(&state, user.email, row, &address_raw, cq.asset).await;
     }
 
     let fw = state.wallets.load_or_init(federation_id).await?;
@@ -184,6 +202,7 @@ pub async fn show(
             receipt_count: activity.receipts.len(),
         },
         receipts,
+        asset_activities: Vec::new(),
         is_liquid: false,
     }
     .into_response())
@@ -201,6 +220,7 @@ async fn render_liquid_address_detail(
     email: String,
     row: crate::models::FederationRow,
     address_raw: &str,
+    selected_asset: Option<String>,
 ) -> Result<Response, AppError> {
     let fw = state.elements_wallets.load_or_init(row.id).await?;
     let summary = fw.sync().await?;
@@ -219,17 +239,60 @@ async fn render_liquid_address_detail(
         )));
     };
 
-    // Real per-address activity: LWK stamps every wallet output with its
-    // derivation index, so we can attribute the confidential amounts.
-    let activity = fw.address_activity(Chain::External, index).await?;
+    // Real per-address, **per-asset** activity: LWK stamps every wallet output
+    // with its derivation index + asset, so we attribute confidential amounts
+    // to (address, asset).
     let tip = summary.tip_height;
-    let mut receipts: Vec<ReceiptView> = activity
-        .receipts
-        .iter()
-        .map(|r| liquid_receipt_view(r, tip))
+    let mut asset_activities: Vec<AddressAssetActivityView> = fw
+        .address_activity_by_asset(Chain::External, index)
+        .await?
+        .into_iter()
+        .map(|a| {
+            let is_active = match selected_asset.as_deref() {
+                Some(sel) => sel == a.asset_id,
+                None => a.is_policy,
+            };
+            let mut receipts: Vec<ReceiptView> = a
+                .receipts
+                .iter()
+                .map(|r| liquid_receipt_view(r, tip))
+                .collect();
+            receipts.sort_by(|x, y| y.height.cmp(&x.height));
+            AddressAssetActivityView {
+                asset_label: if a.is_policy {
+                    "L-BTC".to_string()
+                } else {
+                    a.asset_id.chars().take(4).collect()
+                },
+                is_policy: a.is_policy,
+                is_active,
+                total_received_btc: format_sat(a.received_sat),
+                unspent_btc: format_sat(a.unspent_sat),
+                receipt_count: a.receipts.len(),
+                receipts,
+                asset_id: a.asset_id,
+            }
+        })
         .collect();
-    // Newest first, mirroring the Bitcoin table's ordering.
-    receipts.sort_by(|a, b| b.height.cmp(&a.height));
+    // Guarantee one active tab even if `?asset=` names an asset with no
+    // activity here (or the policy asset has none).
+    let none_active = !asset_activities.iter().any(|v| v.is_active);
+    if let (true, Some(first)) = (none_active, asset_activities.first_mut()) {
+        first.is_active = true;
+    }
+    // Header totals mirror the policy-asset panel (hidden in the Liquid view,
+    // which shows the per-asset panels instead).
+    let (hdr_recv, hdr_unspent, hdr_count) =
+        asset_activities.iter().find(|a| a.is_policy).map_or_else(
+            || ("0.00000000".to_string(), "0.00000000".to_string(), 0),
+            |a| {
+                (
+                    a.total_received_btc.clone(),
+                    a.unspent_btc.clone(),
+                    a.receipt_count,
+                )
+            },
+        );
 
     // The unconfidential address is the scriptPubKey-bearing form electrs
     // indexes by (drop the blinding key).
@@ -263,11 +326,12 @@ async fn render_liquid_address_detail(
             qr_svg,
             derivation_index: Some(index),
             keychain: "external".to_string(),
-            total_received_btc: format_sat(activity.received_sat),
-            unspent_btc: format_sat(activity.unspent_sat),
-            receipt_count: activity.receipts.len(),
+            total_received_btc: hdr_recv,
+            unspent_btc: hdr_unspent,
+            receipt_count: hdr_count,
         },
-        receipts,
+        receipts: Vec::new(),
+        asset_activities,
         is_liquid: true,
     }
     .into_response())

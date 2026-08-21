@@ -706,18 +706,26 @@ pub async fn find_proposal_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option
 pub async fn sum_inflight_inputs_for_federation(
     pool: &PgPool,
     federation_id: Uuid,
+    chain: &str,
 ) -> sqlx::Result<u64> {
     // PostgreSQL widens `SUM(bigint)` to `numeric` to avoid overflow over
     // very large groups. sqlx-postgres won't auto-decode `numeric` into
     // `i64`, so we cast the COALESCE'd aggregate back to `bigint`. Our
     // amounts (capped at ~21M BTC = 2.1e15 sats) comfortably fit in i64.
+    //
+    // A dual-chain vault carries both Bitcoin (PSBT) and Elements (PSET)
+    // proposals against the same `federation_id`; the reserved/in-flight
+    // figure is **per chain** (a Bitcoin balance must not count an in-flight
+    // Liquid sweep's L-BTC sats, and vice-versa), so scope by `chain`.
     let sats: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM((coin_selection_json->>'total_input_sat')::bigint), 0)::bigint \
          FROM transaction_proposals \
          WHERE federation_id = $1 \
+           AND chain = $2 \
            AND status IN ('proposed', 'signing', 'finalized')",
     )
     .bind(federation_id)
+    .bind(chain)
     .fetch_one(pool)
     .await?;
     Ok(u64::try_from(sats).unwrap_or(0))

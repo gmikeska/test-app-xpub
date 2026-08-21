@@ -20,14 +20,25 @@
       {% endif %}
     </label>
     {% if locked_recipient.is_none() %}
+    {% if federation.is_liquid && !asset_options.is_empty() %}
     <label>
-      <span>Amount ({{ federation.asset_ticker }})</span>
+      <span>Asset</span>
+      <select id="asset_id" name="asset_id">
+        {% for o in asset_options %}
+          <option value="{% if o.is_policy %}L-BTC{% else %}{{ o.asset_id }}{% endif %}"{% if o.is_policy %} selected{% endif %}>{% if o.is_policy %}L-BTC{% else %}{{ o.asset_id }}{% endif %}</option>
+        {% endfor %}
+      </select>
+      <small class="muted">Defaults to L-BTC (the policy asset). Issued assets pay their network fee in L-BTC.</small>
+    </label>
+    {% endif %}
+    <label>
+      <span>Amount (<span id="amount_ticker">{{ federation.asset_ticker }}</span>)</span>
       <div class="amount-row" style="display:flex; gap:.5rem; align-items:center;">
         <input type="text" id="amount_btc" name="amount_btc" required autocomplete="off"
                placeholder="0.0005" pattern="^\d+(\.\d{1,8})?$" style="flex:1;">
         <button type="button" id="send_max_btn" style="padding:9px 14px; border-radius:6px; border:1px solid var(--border); background:var(--panel-2); color:inherit; font:inherit; cursor:pointer; white-space:nowrap;">Max</button>
       </div>
-      <small class="muted">Enter a recipient + fee rate, then <strong>Max</strong> to fill the full balance (fee deducted).</small>
+      <small class="muted">Enter a recipient + fee rate, then <strong>Max</strong> to fill the full balance (for L-BTC the fee is deducted).</small>
     </label>
     <input type="hidden" id="send_max" name="send_max" value="">
     <script>
@@ -39,12 +50,19 @@
         if (!form || !btn || !amt || !flag) return;
         var recip = form.querySelector('[name="recipient_address"]');
         var fee = form.querySelector('[name="fee_rate_sat_vb"]');
+        var assetSel = document.getElementById('asset_id');
+        var ticker = document.getElementById('amount_ticker');
         // Manual amount edits revert to a normal (non-max) send.
         amt.addEventListener('input', function () { flag.value = ''; });
         // Changing recipient/fee while in max mode invalidates the filled amount.
         function resetMax() { if (flag.value === 'true') { flag.value = ''; amt.value = ''; } }
         if (recip) recip.addEventListener('input', resetMax);
         if (fee) fee.addEventListener('input', resetMax);
+        // Switching asset relabels the amount unit and invalidates a filled max.
+        if (assetSel) assetSel.addEventListener('change', function () {
+          if (ticker) ticker.textContent = assetSel.value === 'L-BTC' ? 'L-BTC' : assetSel.value.slice(0, 8) + '…';
+          flag.value = ''; amt.value = '';
+        });
         btn.addEventListener('click', async function () {
           var address = (recip && recip.value || '').trim();
           var feeRate = (fee && fee.value || '').trim();
@@ -57,6 +75,9 @@
                     + '?recipient_address=' + encodeURIComponent(address)
                     + '&fee_rate_sat_vb=' + encodeURIComponent(feeRate);
             {% if federation.is_liquid %}url += '&chain=elements';{% endif %}
+            if (assetSel && assetSel.value && assetSel.value !== 'L-BTC') {
+              url += '&asset=' + encodeURIComponent(assetSel.value);
+            }
             var res = await fetch(url, { headers: { 'Accept': 'application/json' } });
             if (!res.ok) { alert('Could not compute max: ' + (await res.text())); return; }
             var data = await res.json();

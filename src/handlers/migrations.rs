@@ -583,7 +583,14 @@ pub async fn federation_manage(
     let is_liquid = header.is_liquid;
 
     // Balance for the header (the page's version) — LWK for Liquid, BDK for BTC.
-    let reserved = db::sum_inflight_inputs_for_federation(&state.db, federation_id).await?;
+    // Reserved/in-flight is per chain, so the Elements sweep never shows on the
+    // Bitcoin view (and vice-versa).
+    let reserved = db::sum_inflight_inputs_for_federation(
+        &state.db,
+        federation_id,
+        if is_liquid { "elements" } else { "bitcoin" },
+    )
+    .await?;
     let (federation, balance) = if is_liquid {
         let fw = state.elements_wallets.load_or_init(federation_id).await?;
         let sync = fw.sync().await?;

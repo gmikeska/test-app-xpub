@@ -53,6 +53,16 @@
     <dt>Amount</dt>
     <dd>{{ proposal.recipient_amount_btc }} {{ federation.asset_ticker }}</dd>
 
+    {% if !proposal.assets.is_empty() %}
+    <dt>Assets</dt>
+    <dd>
+      {% for a in proposal.assets %}
+        <div>{{ a.amount }} <code class="break" title="{{ a.asset_id }}">{{ a.asset_label }}…</code></div>
+      {% endfor %}
+      <small class="muted">Issued assets swept alongside {{ federation.asset_ticker }} in this migration (full id on hover).</small>
+    </dd>
+    {% endif %}
+
     <dt>Change</dt>
     <dd>{{ proposal.change_btc }} {{ federation.asset_ticker }}</dd>
 

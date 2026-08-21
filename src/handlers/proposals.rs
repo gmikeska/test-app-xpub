@@ -61,6 +61,11 @@ pub struct CreateProposalForm {
     /// for current signers; ignored otherwise.
     #[serde(default)]
     pub send_max: Option<String>,
+    /// Liquid only: the asset to send. `None` / `"L-BTC"` / the policy-asset id
+    /// resolve to L-BTC; any other id sends that issued asset. Ignored on
+    /// Bitcoin. Send-Max (drain) is honored only for L-BTC.
+    #[serde(default)]
+    pub asset_id: Option<String>,
     /// Fee rate in sat/vB (regtest default = 2).
     pub fee_rate_sat_vb: u64,
     /// Optional human-readable label.
@@ -168,7 +173,16 @@ pub async fn create(
             let address = fw.parse_address(form.recipient_address.trim())?;
             // Liquid federations don't carry the versioned old-signer migration
             // flow, but do support Send-Max (drain) as well as an explicit amount.
-            let send_max = matches!(form.send_max.as_deref(), Some("true"));
+            // `asset` is the issued asset to send, if any — L-BTC (policy) is the
+            // default. Send-Max (drain) applies to L-BTC only; issued-asset "max"
+            // is delivered as an explicit amount (the full asset balance), since
+            // the fee is paid separately in L-BTC.
+            let asset = form
+                .asset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("l-btc"));
+            let send_max = matches!(form.send_max.as_deref(), Some("true")) && asset.is_none();
             let built = if send_max {
                 fw.build_drain_proposal(&address, Some(form.fee_rate_sat_vb))
                     .await?
@@ -180,7 +194,7 @@ pub async fn create(
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| AppError::BadRequest("amount is required".to_string()))?;
                 let satoshi = parse_lbtc_amount_sat(amount_str)?;
-                fw.build_proposal(&address, satoshi, Some(form.fee_rate_sat_vb))
+                fw.build_proposal(&address, satoshi, asset, Some(form.fee_rate_sat_vb))
                     .await?
             };
             db::insert_proposal(
@@ -234,6 +248,11 @@ pub struct MaxSpendQuery {
     /// same toggle the Send form posts on). Absent/other = Bitcoin.
     #[serde(default)]
     pub chain: Option<String>,
+    /// Liquid only: when set to an issued-asset id, "Max" is that asset's full
+    /// balance (fee is paid separately in L-BTC, so no deduction). Absent /
+    /// `"L-BTC"` / the policy id → the L-BTC drain amount (balance − fee).
+    #[serde(default)]
+    pub asset: Option<String>,
 }
 
 /// The exact net amount a Send-Max drain would deliver to the recipient
@@ -269,8 +288,18 @@ pub async fn max_spend(
     {
         let fw = state.elements_wallets.load_or_init(federation_id).await?;
         fw.sync().await?;
-        let address = fw.parse_address(q.recipient_address.trim())?;
-        fw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?
+        let asset = q
+            .asset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("l-btc"));
+        if let Some(a) = asset {
+            // Issued-asset max = full asset balance; the fee comes out of L-BTC.
+            fw.asset_total_sat(a).await?
+        } else {
+            let address = fw.parse_address(q.recipient_address.trim())?;
+            fw.compute_drain_amount(&address, q.fee_rate_sat_vb).await?
+        }
     } else {
         let fw = state.wallets.load_or_init(federation_id).await?;
         fw.sync().await?;
@@ -337,10 +366,23 @@ struct ProposalDetailView {
     total_output_btc: String,
     change_btc: String,
     input_count: u64,
+    /// Issued (non-policy) assets carried by this proposal — populated for
+    /// Liquid migration sweeps, which move L-BTC (shown as `recipient_amount_btc`)
+    /// **and** every held asset in one PSET. Empty for plain sends / Bitcoin.
+    assets: Vec<MigrationAssetView>,
     psbt_b64: String,
     finalized_tx_hex: Option<String>,
     txid: Option<String>,
     broadcast_at: Option<String>,
+}
+
+/// One issued-asset leg of a Liquid migration sweep, for the proposal detail page.
+#[derive(Debug, Serialize)]
+struct MigrationAssetView {
+    asset_id: String,
+    /// First 8 chars of the asset id, for a compact label.
+    asset_label: String,
+    amount: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,6 +498,7 @@ pub async fn detail(
         total_output_btc: format_btc_sats(proposal_field_u64(&proposal, "total_output_sat")),
         change_btc: format_btc_sats(proposal_field_u64(&proposal, "change_sat")),
         input_count: proposal_field_u64(&proposal, "input_count"),
+        assets: proposal_swept_assets(&proposal),
         psbt_b64: proposal.psbt_b64.clone(),
         finalized_tx_hex: proposal.finalized_tx_hex.clone(),
         txid: proposal.txid.clone(),
@@ -1171,6 +1214,32 @@ fn proposal_field_u64(p: &ProposalRow, field: &str) -> u64 {
         .get(field)
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0)
+}
+
+/// The issued-asset legs of a proposal, read from the `assets_swept` array a
+/// Liquid migration sweep writes into its proposal JSON (`[{asset, amount_sat}]`).
+/// Empty for plain sends and Bitcoin proposals.
+fn proposal_swept_assets(p: &ProposalRow) -> Vec<MigrationAssetView> {
+    p.proposal_json
+        .get("assets_swept")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    let asset_id = a.get("asset").and_then(serde_json::Value::as_str)?;
+                    let amount_sat = a
+                        .get("amount_sat")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    Some(MigrationAssetView {
+                        asset_label: asset_id.chars().take(8).collect(),
+                        asset_id: asset_id.to_string(),
+                        amount: format_btc_sats(amount_sat),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn status_class(status: &str) -> &'static str {
