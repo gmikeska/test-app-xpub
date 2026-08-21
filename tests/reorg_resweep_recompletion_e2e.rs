@@ -295,6 +295,8 @@ async fn censorship_reorg_resweep_recompletes_migration() {
             total_signers: 3,
             network: "regtest",
             descriptor: &v0_built.descriptor_string,
+            script_type: "wsh",
+            nums_chaincode: None,
             elements_descriptor: None,
             snapshot_json: &v0_built.snapshot_json,
             master_blinding_key: None,
