@@ -5,6 +5,10 @@ are documented here. This is the app's first CHANGELOG; the `0.2.0` entry
 summarizes the current cycle (which tracks the emvault suite **0.8.0** / Bitcoin
 Taproot release). Earlier history lives in git.
 
+## [0.4.0] - 2026-08-28
+
+Tracks emvault suite **0.10.0** (Taproot signing/verification + config-auth security hardening). No app-side functional changes this round.
+
 ## [0.3.0] - 2026-08-21
 
 Tracks emvault suite **0.9.0** (asset-aware Elements migration).
