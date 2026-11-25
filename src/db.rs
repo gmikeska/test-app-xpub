@@ -1846,6 +1846,11 @@ mod tests {
             total_signers: 1,
             network: "testnet",
             descriptor: "wsh(sortedmulti(1,...))",
+            // The descriptor above is `wsh`, so these take the wsh values the
+            // struct documents: `"wsh"` and no NUMS chain code. A taproot
+            // lineage sets both together.
+            script_type: "wsh",
+            nums_chaincode: None,
             elements_descriptor: None,
             snapshot_json: &snap,
             master_blinding_key: None,

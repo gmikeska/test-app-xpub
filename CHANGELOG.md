@@ -5,6 +5,24 @@ are documented here. This is the app's first CHANGELOG; the `0.2.0` entry
 summarizes the current cycle (which tracks the emvault suite **0.8.0** / Bitcoin
 Taproot release). Earlier history lives in git.
 
+## [0.12.0] - 2026-11-24
+
+Tracks emvault suite **0.12.0** (suite 0.11.0 is yanked). Version aligned to the suite number
+rather than continuing the app's own 0.x line.
+
+### Fixed
+- **`cargo build --all-features` was broken** (`src/db.rs`). The `db-tests`-gated `mk_v0` helper
+  still built `NewFederation` without `script_type` / `nums_chaincode`, the two fields added in
+  `b91858d` (Ledger-only Taproot federation creation), so the `lib test` target failed to compile
+  with `E0063`. The helper builds a `wsh` descriptor, so it now passes the `wsh` values the struct
+  documents. ▶ Unrelated to emvault — app-side drift that only an `--all-features` build reaches.
+- **Every `[patch.crates-io]` entry was silently dead and the app was building against the
+  published `emvault 0.10.0`, not this tree.** A patch is only applied if the patched crate's
+  version satisfies the dependency requirement; with requirements at `"0.10"` and the local
+  trees at 0.12.0, cargo ignored all six patches, emitted `patch ... was not used in the crate
+  graph` as a *warning*, and resolved the registry copy. The build stayed green, so nothing
+  surfaced it. Requirements now read `"0.12"`, which re-engages the patches.
+
 ## [0.4.0] - 2026-08-28
 
 Tracks emvault suite **0.10.0** (Taproot signing/verification + config-auth security hardening). No app-side functional changes this round.
