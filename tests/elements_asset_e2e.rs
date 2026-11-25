@@ -49,6 +49,7 @@ use std::str::FromStr;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use emvault::elements::descriptor::{CtKeyMode, to_multipath_string};
 use emvault::elements::elements::pset::PartiallySignedTransaction as Pset;
 use emvault::elements::testkit::SoftwareSigner;
 use emvault::elements::{CtDescriptorBuilder, ElementsSigner};
@@ -172,11 +173,27 @@ async fn provision(
 
     // A fixed SLIP-77 master blinding key for the confidential descriptor.
     let mbk: [u8; 32] = [0x2a; 32];
-    let mut builder = CtDescriptorBuilder::new(2, &mbk).expect("ct descriptor builder");
+    // ▶ `CtKeyMode::Ranged` and the multipath form are both required, and the
+    // default is neither.
+    //
+    // `CtKeyMode` defaults to `Fixed`, whose own doc says "the descriptor
+    // produces one address". This federation then has addresses revealed from it
+    // by index, which fails as
+    // `AddressDerive("Cannot use derivation index when the descriptor has no
+    // wildcard")` — an error that describes the descriptor rather than the
+    // builder call that chose it. `to_multipath_string` turns `/0/*` into
+    // `/<0;1>/*` so receive and change share one descriptor.
+    //
+    // This mirrors how the app itself builds a CT descriptor
+    // (`test-app-pkcs11/src/elements_wallet.rs:377`); the mismatch was invisible
+    // because these tests are `RPC_LIVE=1`-gated and had not been run.
+    let mut builder = CtDescriptorBuilder::new(2, &mbk)
+        .expect("ct descriptor builder")
+        .key_mode(CtKeyMode::Ranged);
     for s in &signers {
         builder.add_signer(s).expect("add signer");
     }
-    let descriptor = builder.build().expect("build ct descriptor").to_string();
+    let descriptor = to_multipath_string(&builder.build().expect("build ct descriptor"));
 
     let network = env_or("ELEMENTS_NETWORK", "elementsregtest");
     let spec = NewFederation {
@@ -279,10 +296,27 @@ async fn elements_asset_receive_and_balances() {
     let asset = issue_asset(1000.0);
     fund(&addr, LBTC_SATS, None);
     fund(&addr, ASSET_SATS, Some(&asset));
-    wallet.sync().await.expect("resync after funding");
+
+    // ▶ Poll rather than sync once. `fund` mines the block, but electrs indexes
+    // on its own schedule, so a sync issued immediately after `mine(1)` can run
+    // before the indexer has the block — and the wollet then reports an **empty**
+    // balance, which asserts as `left: 0` and reads like the funding never
+    // happened rather than like a race. Bounded retry, not a fixed sleep.
+    let mut balances = Vec::new();
+    for attempt in 0..30u32 {
+        wallet.sync().await.expect("resync after funding");
+        balances = wallet.asset_balances().await.expect("asset balances");
+        if balances.iter().any(|b| b.is_policy && b.sat == LBTC_SATS) {
+            break;
+        }
+        assert!(
+            attempt < 29,
+            "indexer never surfaced the funding after 30 syncs (~15s)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
     // Holdings-by-asset: policy asset (L-BTC) first, then the issued asset.
-    let balances = wallet.asset_balances().await.expect("asset balances");
     assert!(!balances.is_empty(), "expected at least L-BTC");
     assert!(balances[0].is_policy, "policy asset must be listed first");
     let lbtc = balances.iter().find(|b| b.is_policy).expect("L-BTC row");

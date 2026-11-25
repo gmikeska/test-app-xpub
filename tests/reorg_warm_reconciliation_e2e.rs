@@ -26,7 +26,10 @@
 //!
 //! ## Harness (gv-regtest)
 //!   * regtest bitcoind — JSON-RPC `host.docker.internal:18543` (`regtest`/`regtest`)
-//!   * Postgres — `host.docker.internal:5546/asterism_xpub`
+//!   * Postgres — `DATABASE_URL` from `.env`
+//!     (`host.docker.internal:5544/asterism_xpub`, container
+//!     `emv-asterism-pg-5544`). NOT `:5546` — that is `gv-dev-pg-5546`, a
+//!     `GroupVault` database.
 //!
 //! No hardware is touched — the federation is descriptor-only. Opt-in gate
 //! (skips cleanly otherwise): `RPC_LIVE=1`. Run from `test-app-xpub/`:
@@ -144,10 +147,24 @@ fn set_env(key: &str, val: &str) {
 /// overriding the `.env` (signet) defaults.
 fn configure_regtest_rpc_env() {
     let _ = dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env"));
-    set_env(
-        "DATABASE_URL",
-        "postgres://asterism:asterism@host.docker.internal:5546/asterism_xpub",
-    );
+    // ▶ DATABASE_URL is deliberately NOT overridden — it comes from `.env`.
+    //
+    // This used to pin `host.docker.internal:5546`, which is `gv-dev-pg-5546`:
+    // a *GroupVault* dev database that never hosted `asterism_xpub` at all. The
+    // right endpoint is `.env`'s `:5544` (container `emv-asterism-pg-5544`).
+    // Stopped, the override reads as `PoolTimedOut`, which looks like "no
+    // database anywhere" rather than "the wrong database". Same defect fixed in
+    // `test-app-pkcs11`'s reorg gates.
+    // ▶ Force the RPC/emitter backend. `.env` sets `APP_CHAIN_BACKEND=electrum`
+    // with `APP_ELECTRUM_URL=tcp://host.docker.internal:60001`, and that Fulcrum
+    // serves **testnet4** (genesis `00000000da84f2ba…`), while these tests drive
+    // the regtest node on `:18543` (genesis `0f9188f13cb7b2c7…`). Leaving the
+    // backend unset points a regtest chain at a testnet4 indexer, which fails as
+    // `Electrum(Message("cannot find agreement block with server"))` — a chain
+    // mismatch that reads like an unreachable server. These are emitter tests;
+    // `test-app-pkcs11`'s equivalent gate sets this explicitly for the same
+    // reason.
+    set_env("APP_CHAIN_BACKEND", "rpc");
     set_env("BITCOIN_NETWORK", "regtest");
     set_env("BITCOIN_RPC_HOST", "host.docker.internal");
     set_env("BITCOIN_RPC_PORT", "18543");

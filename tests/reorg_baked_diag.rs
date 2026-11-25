@@ -12,7 +12,7 @@
 //! diff has nothing to compare against and returns `reorg_rebuilt = false` forever.
 //! The orphaned-anchor signal (printed here) is what a robust detector keys on.
 //!
-//! Gate: `RPC_LIVE=1` (needs gv-regtest bitcoind :18543 + Postgres :5546). Run:
+//! Gate: `RPC_LIVE=1` (needs gv-regtest bitcoind :18543 + Postgres :5544). Run:
 //! ```bash
 //! RPC_LIVE=1 cargo test --test reorg_baked_diag -- --nocapture --test-threads=1
 //! ```
@@ -37,10 +37,19 @@ async fn diagnose_baked_reorg_wallets() {
     if skip() {
         return;
     }
-    let db_url = "postgres://asterism:asterism@host.docker.internal:5546/asterism_xpub";
+    // ▶ `DATABASE_URL` from `.env`, not a hardcoded endpoint.
+    //
+    // This was pinned to `host.docker.internal:5546`, which is `gv-dev-pg-5546`:
+    // a *GroupVault* dev database that never hosted `asterism_xpub`. The right
+    // endpoint is `.env`'s `:5544` (container `emv-asterism-pg-5544`). Stopped,
+    // the old pin read as `PoolTimedOut` — "no database anywhere" rather than
+    // "the wrong database". Same defect fixed in `test-app-pkcs11`'s reorg gates
+    // and in this app's six other e2e files.
+    let _ = dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env"));
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL (from .env)");
     let rpc_url = "http://host.docker.internal:18543";
 
-    let pool = sqlx::PgPool::connect(db_url)
+    let pool = sqlx::PgPool::connect(&db_url)
         .await
         .expect("connect Postgres");
     let rpc = RpcClient::new(
